@@ -7,8 +7,8 @@ import time
 import re
 from datetime import datetime
 
-TELEGRAM_TOKEN="YOUR_TOKEN"
-ADMIN_ID="YOUR_TELEGRAM_ID"
+TELEGRAM_TOKEN="8385287062:AAGgwYA0l7-Cuq4jA7dgcy5GkFAvDp7X1GM"
+ADMIN_ID="1145085024"
 USERS_FILE="users.json"
 DAILY_LIMIT=20
 
@@ -16,6 +16,8 @@ logging.basicConfig(level=logging.INFO)
 log=logging.getLogger(__name__)
 
 last_update_id=0
+
+# ================= EARTH ENGINE =================
 
 service_account=json.loads(os.environ["GEE_KEY"])
 
@@ -26,7 +28,7 @@ credentials=ee.ServiceAccountCredentials(
 
 ee.Initialize(credentials)
 
-# ---------------- TELEGRAM ----------------
+# ================= TELEGRAM =================
 
 def tg(msg,chat_id):
 
@@ -36,13 +38,13 @@ def tg(msg,chat_id):
         timeout=30
     )
 
-# ---------------- USER STORAGE ----------------
+# ================= USER STORAGE =================
 
 def load_users():
 
     if not os.path.exists(USERS_FILE):
 
-        return {"approved":[],"pending":[],"usage":{}}
+        return {"approved":[ADMIN_ID],"pending":[],"usage":{}}
 
     with open(USERS_FILE,"r") as f:
 
@@ -54,7 +56,7 @@ def save_users(data):
 
         json.dump(data,f)
 
-# ---------------- USER CHECK ----------------
+# ================= USER CHECK =================
 
 def check_user(chat_id):
 
@@ -76,14 +78,11 @@ def check_user(chat_id):
 
     save_users(users)
 
-    tg(
-        f"⚠ User baru meminta akses\nID: {chat_id}\n/approve {chat_id}",
-        ADMIN_ID
-    )
+    tg(f"⚠ User baru meminta akses\nID: {chat_id}\n/approve {chat_id}",ADMIN_ID)
 
     return "new"
 
-# ---------------- QUOTA ----------------
+# ================= QUOTA =================
 
 def check_quota(chat_id):
 
@@ -113,7 +112,7 @@ def check_quota(chat_id):
 
     return True
 
-# ---------------- LOCATION ----------------
+# ================= LOCATION =================
 
 def get_location(lat,lon):
 
@@ -137,7 +136,7 @@ def get_location(lat,lon):
 
         return "Tidak terdeteksi"
 
-# ---------------- ROAD ----------------
+# ================= ROAD =================
 
 def get_road(lat,lon):
 
@@ -163,7 +162,7 @@ def get_road(lat,lon):
 
         return None
 
-# ---------------- SOIL PROFILE ----------------
+# ================= SOIL PROFILE =================
 
 def get_soil_profile(lat,lon):
 
@@ -206,25 +205,7 @@ def get_soil_profile(lat,lon):
 
     return profile
 
-# ---------------- RAIN ----------------
-
-def get_rain(lat,lon):
-
-    point=ee.Geometry.Point([lon,lat])
-
-    rain=ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")\
-        .filterDate("2015-01-01","2024-01-01")\
-        .sum()
-
-    val=rain.reduceRegion(
-        reducer=ee.Reducer.mean(),
-        geometry=point,
-        scale=5000
-    ).get("precipitation")
-
-    return ee.Number(val).getInfo()/9
-
-# ---------------- SLOPE ----------------
+# ================= TERRAIN =================
 
 def get_slope(lat,lon):
 
@@ -242,7 +223,25 @@ def get_slope(lat,lon):
 
     return ee.Number(val).getInfo()
 
-# ---------------- MODEL ----------------
+# ================= RAIN =================
+
+def get_rain(lat,lon):
+
+    point=ee.Geometry.Point([lon,lat])
+
+    rain=ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")\
+        .filterDate("2015-01-01","2024-01-01")\
+        .sum()
+
+    val=rain.reduceRegion(
+        reducer=ee.Reducer.mean(),
+        geometry=point,
+        scale=5000
+    ).get("precipitation")
+
+    return ee.Number(val).getInfo()/9
+
+# ================= MODEL =================
 
 def classify_soil(clay,sand,silt):
 
@@ -326,7 +325,7 @@ def estimate_hard_layer(profile):
 
     return ">2 m"
 
-# ---------------- ANALYSIS ----------------
+# ================= ANALYSIS =================
 
 def analyze_soil(lat,lon,chat_id):
 
@@ -346,7 +345,6 @@ def analyze_soil(lat,lon,chat_id):
     sand=profile["30-60cm"]["sand"]
     silt=profile["30-60cm"]["silt"]
     soc=profile["30-60cm"]["soc"]
-    bdod=profile["30-60cm"]["bdod"]
 
     soil_type=classify_soil(clay,sand,silt)
 
@@ -407,7 +405,7 @@ Organic Carbon {data["soc"]:.1f} %
 
     tg(msg,chat_id)
 
-# ---------------- TELEGRAM LOOP ----------------
+# ================= TELEGRAM LOOP =================
 
 def check_messages():
 
@@ -478,16 +476,13 @@ def check_messages():
 
         time.sleep(2)
 
-# ---------------- MAIN ----------------
+# ================= MAIN =================
 
 def main():
 
     log.info("Soil AI Bot starting")
 
-    tg(
-        "🤖 AI Analisis Tanah aktif\nKirim koordinat untuk analisis",
-        ADMIN_ID
-    )
+    tg("🤖 AI Soil Analyzer aktif",ADMIN_ID)
 
     check_messages()
 
