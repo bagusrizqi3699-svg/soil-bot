@@ -337,3 +337,64 @@ def tests(clay,sand):
     t.append("Sondir / CPT")
 
     return t
+# ================= TELEGRAM LOOP =================
+
+def check_messages():
+
+    global last_update_id
+
+    while True:
+
+        try:
+
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={last_update_id+1}&timeout=30"
+
+            r = requests.get(url, timeout=35).json()
+
+            for update in r.get("result", []):
+
+                last_update_id = update["update_id"]
+
+                msg = update.get("message", {})
+                chat_id = str(msg.get("chat", {}).get("id", ""))
+                text = msg.get("text", "").strip()
+
+                coord = re.search(r"(-?\d+\.?\d*)[, ]+(-?\d+\.?\d*)", text)
+
+                if coord:
+
+                    lat = float(coord.group(1))
+                    lon = float(coord.group(2))
+
+                    analyze_soil(lat, lon, chat_id)
+
+                else:
+
+                    tg(
+                        "📍 Kirim koordinat lokasi\n<code>-7.6048,111.9102</code>",
+                        chat_id
+                    )
+
+        except Exception as e:
+
+            log.error(f"Telegram loop error: {e}")
+
+        time.sleep(2)
+
+
+# ================= MAIN =================
+
+def main():
+
+    log.info("Soil AI Bot starting")
+
+    tg(
+        "🤖 <b>AI Analisis Tanah siap digunakan</b>\n\n"
+        "Kirim koordinat lokasi:\n"
+        "<code>-7.6048,111.9102</code>"
+    )
+
+    check_messages()
+
+
+main()
