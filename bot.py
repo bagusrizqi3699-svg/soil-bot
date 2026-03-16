@@ -7,43 +7,13 @@ log = logging.getLogger(__name__)
 last_update_id = 0
 
 DEPTHS = [
-    ("0-5 cm",     "Subgrade Permukaan", "0",   75),
-    ("5-15 cm",    "Zona Drainase",      "10",  74),
-    ("15-30 cm",   "Subbase Dangkal",    "30",  73),
-    ("30-60 cm",   "Subgrade Utama",     "60",  72),
-    ("60-100 cm",  "Lapisan Dalam",      "100", 68),
-    ("100-200 cm", "Pondasi Dalam",      "200", 65),
+    ("0-5 cm",     "Subgrade Permukaan", "0-5cm",    75),
+    ("5-15 cm",    "Zona Drainase",      "5-15cm",   74),
+    ("15-30 cm",   "Subbase Dangkal",    "15-30cm",  73),
+    ("30-60 cm",   "Subgrade Utama",     "30-60cm",  72),
+    ("60-100 cm",  "Lapisan Dalam",      "60-100cm", 68),
+    ("100-200 cm", "Pondasi Dalam",      "100-200cm",65),
 ]
-
-BASE = "http://api.openlandmap.org/query/point"
-
-def get_soil(lat, lon, d):
-    result = {}
-    queries = {
-        "clay": f"sol_clay.wfraction_usda.3a1a1a_m_250m_b{d}..{d}cm_1950..2017_v0.2.tif",
-        "sand": f"sol_sand.wfraction_usda.3a1a1a_m_250m_b{d}..{d}cm_1950..2017_v0.2.tif",
-        "bdod": f"sol_bulkdens.fineearth_usda.4a1h_m_250m_b{d}..{d}cm_1950..2017_v0.2.tif",
-        "soc":  f"sol_organic.carbon_usda.6a1c_m_250m_b{d}..{d}cm_1950..2017_v0.2.tif",
-    }
-    for key, regex in queries.items():
-        try:
-            r = requests.get(
-                f"{BASE}?lat={lat}&lon={lon}&coll=predicted250m&regex={regex}",
-                timeout=15
-            ).json()
-            resp = r.get("response", [{}])
-            if resp:
-                val = resp[0].get(regex)
-                if val is not None:
-                    if key == "clay": result["clay"] = float(val) * 100
-                    elif key == "sand": result["sand"] = float(val) * 100
-                    elif key == "bdod": result["bdod"] = float(val) / 100
-                    elif key == "soc":  result["soc"]  = float(val)
-        except Exception as e:
-            log.error(f"{key} d={d}: {e}")
-    if "clay" in result and "sand" in result:
-        result["silt"] = max(0, 100 - result["clay"] - result["sand"])
-    return result
 
 def tg(msg, chat_id=None):
     cid = chat_id or TELEGRAM_CHAT_ID
@@ -53,11 +23,40 @@ def tg(msg, chat_id=None):
         timeout=15
     )
 
+def get_soil(lat, lon, depth):
+    props = ["clay", "sand", "silt", "bdod", "soc", "cec"]
+    url = "https://api-test.openepi.io/soil/property"
+    params = {
+        "lat": lat, "lon": lon,
+        "depths": depth,
+        "properties": ",".join(props)
+    }
+    r = requests.get(url, params=params, timeout=20)
+    r.raise_for_status()
+    data = r.json()
+    result = {}
+    layers = data.get("properties", {}).get("layers", [])
+    for layer in layers:
+        name = layer.get("name")
+        for d in layer.get("depths", []):
+            if d.get("label") == depth:
+                val = d.get("values", {}).get("mean")
+                if val is not None:
+                    if name == "clay":  result["clay"] = val / 10
+                    elif name == "sand": result["sand"] = val / 10
+                    elif name == "silt": result["silt"] = val / 10
+                    elif name == "bdod": result["bdod"] = val / 100
+                    elif name == "soc":  result["soc"]  = val / 10
+                    elif name == "cec":  result["cec"]  = val / 10
+    if "clay" in result and "sand" in result and "silt" not in result:
+        result["silt"] = max(0, 100 - result["clay"] - result["sand"])
+    return result
+
 def classify_soil(clay, sand, silt):
     if clay >= 40 and silt >= 40: return "Silty Clay"
     elif clay >= 40: return "Clay"
     elif clay >= 35 and sand >= 45: return "Sandy Clay"
-    elif clay >= 27 and sand >= 20 and sand < 45: return "Clay Loam"
+    elif clay >= 27 and 20 <= sand < 45: return "Clay Loam"
     elif clay >= 27 and silt >= 20: return "Silty Clay Loam"
     elif clay >= 20 and sand >= 45: return "Sandy Clay Loam"
     elif silt >= 80: return "Silt"
@@ -75,9 +74,15 @@ def soil_category(clay, bdod, soc):
     elif clay > 10: return ("AGAK PADAT", "🟢")
     else: return ("PADAT", "✅")
 
-def is_expansive(clay):
-    if clay > 60: return ("TINGGI", "🔴", 80)
-    elif clay > 40: return ("SEDANG", "🟡", 55)
+def is_expansive(clay, cec=None):
+    score = 0
+    if clay > 60: score += 2
+    elif clay > 40: score += 1
+    if cec:
+        if cec > 15: score += 2
+        elif cec > 10: score += 1
+    if score >= 3: return ("TINGGI", "🔴", 80)
+    elif score >= 2: return ("SEDANG", "🟡", 55)
     else: return ("RENDAH", "✅", 20)
 
 def is_peat(soc, bdod):
@@ -91,35 +96,35 @@ def estimate_cbr(clay, sand, bdod):
     elif sand and sand > 60: return "10-20% (Baik)"
     else: return "6-10% (Cukup)"
 
-def calc_risks(clay, sand, silt, bdod, soc):
+def calc_risks(clay, sand, silt, bdod, soc, cec):
     risks = []
     peat = is_peat(soc, bdod)
     if peat:
         risks += [
-            ("Settlement Ekstrem", 95, "🔴", "Gambut sangat kompresibel → jalan amblas masif"),
+            ("Settlement Ekstrem", 95, "🔴", "Gambut kompresibel → jalan amblas masif, tidak stabil"),
             ("Bearing Capacity Gagal", 92, "🔴", "Daya dukung hampir nol → perlu cerucuk/replacement"),
-            ("Rutting Parah", 90, "🔴", "Beban lalu lintas melesak langsung ke gambut"),
-            ("Kebakaran Bawah Tanah", 60, "🟡", "Gambut kering rentan terbakar → rongga bawah jalan"),
+            ("Rutting Parah", 90, "🔴", "Beban lalu lintas melesak ke gambut"),
+            ("Kebakaran Bawah Tanah", 60, "🟡", "Gambut kering → rongga bawah jalan"),
         ]
     else:
         if clay > 35:
-            exp_lvl, _, exp_pct = is_expansive(clay)
+            exp_lvl, _, exp_pct = is_expansive(clay, cec)
             risks += [
                 ("Retak Reflektif", min(95, 40+int(clay)), "🔴" if clay>50 else "🟠",
                  f"Clay {clay:.0f}% → aspal retak ikuti pola kembang-susut tanah"),
                 ("Rutting/Ambles", min(90, 35+int(clay)), "🔴" if clay>50 else "🟠",
                  f"Subgrade lunak, CBR rendah → jalan amblas saat hujan/beban berat"),
                 ("Heave (Terangkat)", exp_pct, "🔴" if exp_pct>60 else "🟡",
-                 f"Ekspansif {exp_lvl} → perkerasan terangkat saat musim hujan"),
+                 f"Ekspansif {exp_lvl} → perkerasan terangkat musim hujan"),
                 ("Banjir/Genangan", min(85, 30+int(clay)), "🔴" if clay>45 else "🟠",
-                 "Clay tinggi, permeabilitas rendah → air sulit meresap"),
+                 "Clay tinggi → air sulit meresap, genangan di badan jalan"),
             ]
         if silt and silt > 30:
             risks += [
                 ("Erosi Tepi Jalan", min(85, 20+int(silt)), "🔴" if silt>50 else "🟡",
                  f"Silt {silt:.0f}% → bahu jalan mudah terkikis aliran air"),
                 ("Pumping", min(75, 15+int(silt)), "🟡",
-                 "Material keluar dari retakan perkerasan saat beban dinamis"),
+                 "Material keluar dari retakan saat beban dinamis"),
             ]
         if sand and sand > 60:
             risks += [
@@ -129,87 +134,78 @@ def calc_risks(clay, sand, silt, bdod, soc):
                  "Pasir lepas → risiko likuifaksi saat gempa/getaran berat"),
             ]
         if not risks:
-            risks.append(("Risiko Umum", 25, "🟢", "Kondisi tanah relatif baik"))
+            risks.append(("Risiko Umum", 25, "🟢", "Kondisi tanah relatif baik, pantau drainase"))
     risks.sort(key=lambda x: x[1], reverse=True)
     return risks
 
-def recommend(clay, sand, silt, bdod, soc):
+def recommend(clay, sand, silt, bdod, soc, cec):
     peat = is_peat(soc, bdod)
     if peat:
-        return [
-            "❌ TIDAK LAYAK tanpa penanganan khusus",
-            "Opsi 1: Full replacement gambut",
-            "Opsi 2: Cerucuk/tiang + geotextile woven",
-            "Opsi 3: Preloading + PVD (vertical drain)",
-            "Drainase: Sistem drainase dalam wajib",
-            "Investigasi: Boring + settlement monitoring",
-        ]
+        return ["❌ TIDAK LAYAK tanpa penanganan khusus",
+                "Opsi 1: Full replacement gambut",
+                "Opsi 2: Cerucuk/tiang + geotextile woven",
+                "Opsi 3: Preloading + PVD (vertical drain)",
+                "Drainase: Sistem drainase dalam wajib",
+                "Investigasi: Boring + settlement monitoring"]
     elif clay > 35:
-        exp, _, _ = is_expansive(clay)
-        return [
-            f"Stabilisasi: Kapur 5-8% atau Semen 3-5% (clay {clay:.0f}%)",
-            "Geotextile: Wajib di interface subgrade-subbase",
-            "Lapis Pondasi: Agregat kelas A min 25-30cm",
-            f"Drainase: Prioritas tinggi (ekspansif {exp})",
-            "Perkerasan: Aspal tebal min 10cm + lapis antara",
-            "Investigasi: CBR lapangan + Atterberg Limits wajib",
-        ]
+        exp, _, _ = is_expansive(clay, cec)
+        return [f"Stabilisasi: Kapur 5-8% atau Semen 3-5% (clay {clay:.0f}%)",
+                "Geotextile: Wajib di interface subgrade-subbase",
+                "Lapis Pondasi: Agregat kelas A min 25-30cm",
+                f"Drainase: Prioritas tinggi (ekspansif {exp})",
+                "Perkerasan: Aspal tebal min 10cm + lapis antara",
+                "Investigasi: CBR lapangan + Atterberg Limits wajib"]
     elif clay > 20:
-        return [
-            "Stabilisasi: Kapur 3-5% jika perlu",
-            "Lapis Pondasi: Agregat kelas B min 20cm",
-            "Geotextile: Disarankan di subgrade",
-            "Drainase: Saluran tepi + subdrain",
-            "Investigasi: DCP test + CBR lapangan",
-        ]
+        return ["Stabilisasi: Kapur 3-5% jika perlu",
+                "Lapis Pondasi: Agregat kelas B min 20cm",
+                "Geotextile: Disarankan di subgrade",
+                "Drainase: Saluran tepi + subdrain",
+                "Investigasi: DCP test + CBR lapangan"]
     elif sand and sand > 60:
-        return [
-            "Stabilisasi: Semen 3-4% untuk ikat pasir",
-            "Geotextile: Wajib cegah erosi & segregasi",
-            "Lapis Pondasi: Agregat kelas A min 15cm",
-            "Drainase: Perhatikan erosi tepi jalan",
-            "Investigasi: Kepadatan lapangan (sandcone)",
-        ]
+        return ["Stabilisasi: Semen 3-4% untuk ikat pasir",
+                "Geotextile: Wajib cegah erosi & segregasi",
+                "Lapis Pondasi: Agregat kelas A min 15cm",
+                "Drainase: Perhatikan erosi tepi jalan",
+                "Investigasi: Kepadatan lapangan (sandcone)"]
     else:
-        return [
-            "Subgrade: Kondisi relatif baik",
-            "Lapis Pondasi: Agregat kelas B min 15cm",
-            "Drainase: Standar, saluran tepi cukup",
-            "Investigasi: DCP test untuk verifikasi",
-        ]
+        return ["Subgrade: Kondisi relatif baik",
+                "Lapis Pondasi: Agregat kelas B min 15cm",
+                "Drainase: Standar, saluran tepi cukup",
+                "Investigasi: DCP test untuk verifikasi"]
 
 def bar(pct, length=10):
     filled = int(round(min(pct,100)/100*length))
     return "█"*filled + "░"*(length-filled)
 
 def analyze_soil(lat, lon, chat_id):
-    tg(f"⏳ Menganalisis tanah...\n📍 {lat}, {lon}\nMohon tunggu ~45 detik.", chat_id)
+    tg(f"⏳ Menganalisis tanah...\n📍 {lat}, {lon}\nMohon tunggu ~30 detik.", chat_id)
     all_data = {}
-    for label, role, d_val, acc in DEPTHS:
+    for label, role, depth, acc in DEPTHS:
         try:
-            d = get_soil(lat, lon, d_val)
+            d = get_soil(lat, lon, depth)
             if d and "clay" in d:
-                all_data[d_val] = (label, role, acc, d)
+                all_data[depth] = (label, role, acc, d)
         except Exception as e:
-            log.error(f"Error d={d_val}: {e}")
+            log.error(f"Error {depth}: {e}")
 
     if not all_data:
-        tg("❌ Gagal ambil data. API sedang tidak merespons.\nCoba lagi beberapa menit.", chat_id)
+        tg("❌ Gagal ambil data. Coba lagi beberapa menit.", chat_id)
         return
 
     msg = (f"📍 <b>LAPORAN TANAH — ROAD ENGINEERING</b>\n"
            f"🌐 Koordinat: {lat}, {lon}\n"
-           f"🔬 Sumber: OpenLandMap (ISRIC)\n\n")
+           f"🔬 Sumber: OpenEPI / SoilGrids (ISRIC)\n\n")
 
-    for d_val, (label, role, acc, d) in all_data.items():
+    for depth, (label, role, acc, d) in all_data.items():
         clay = d.get("clay", 0)
         sand = d.get("sand", 0)
         silt = d.get("silt", 0)
         bdod = d.get("bdod")
         soc  = d.get("soc")
+        cec  = d.get("cec")
         soil_type = classify_soil(clay, sand, silt)
         cat, cat_emoji = soil_category(clay, bdod, soc)
-        exp, exp_emoji, _ = is_expansive(clay)
+        exp, exp_emoji, _ = is_expansive(clay, cec)
         peat_flag = "YA 🔴" if is_peat(soc, bdod) else "Tidak ✅"
 
         msg += f"━━━━━━━━━━━━━━━\n"
@@ -219,18 +215,20 @@ def analyze_soil(lat, lon, chat_id):
         msg += f"Sand: {sand:.0f}% {bar(sand)}\n"
         msg += f"Silt: {silt:.0f}% {bar(silt)}\n"
         if bdod: msg += f"Bulk Density: {bdod:.2f} g/cm³\n"
+        if cec:  msg += f"CEC: {cec:.1f} cmolc/kg\n"
         msg += f"Ekspansif: {exp} {exp_emoji} | Peat: {peat_flag}\n\n"
 
-    main = all_data.get("60", list(all_data.values())[0])
+    main = all_data.get("30-60cm", list(all_data.values())[0])
     _, _, _, md = main
     clay = md.get("clay", 0)
     sand = md.get("sand", 0)
     silt = md.get("silt", 0)
     bdod = md.get("bdod")
     soc  = md.get("soc")
+    cec  = md.get("cec")
     cbr  = estimate_cbr(clay, sand, bdod)
 
-    risks = calc_risks(clay, sand, silt, bdod, soc)
+    risks = calc_risks(clay, sand, silt, bdod, soc, cec)
     msg += "━━━━━━━━━━━━━━━\n"
     msg += "⚠️ <b>RISIKO JALAN</b> (subgrade utama 30-60cm)\n"
     for name, pct, emoji, desc in risks:
@@ -239,7 +237,7 @@ def analyze_soil(lat, lon, chat_id):
     msg += f"\n━━━━━━━━━━━━━━━\n"
     msg += f"📊 <b>ESTIMASI CBR:</b> {cbr}\n"
 
-    recs = recommend(clay, sand, silt, bdod, soc)
+    recs = recommend(clay, sand, silt, bdod, soc, cec)
     msg += f"\n━━━━━━━━━━━━━━━\n"
     msg += "💡 <b>REKOMENDASI ROAD ENGINEERING</b>\n"
     for r in recs:
@@ -267,9 +265,11 @@ def check_messages():
                 if text.lower() in ["/start", "help", "/help"]:
                     tg("🌍 <b>Soil Analyzer — Road Engineering</b>\n\n"
                        "Kirim koordinat:\n<code>-7.6048, 111.9102</code>\n\n"
-                       "📊 Output:\n• Jenis tanah (6 kedalaman)\n"
-                       "• Clay/Sand/Silt%\n• Peat & Ekspansif\n"
-                       "• Estimasi CBR\n• Risiko jalan + %\n"
+                       "📊 Output:\n• Jenis tanah 6 kedalaman\n"
+                       "• Clay/Sand/Silt % + Bulk Density + CEC\n"
+                       "• Deteksi Peat & Ekspansif\n"
+                       "• Estimasi CBR\n"
+                       "• Risiko jalan + persentase\n"
                        "• Rekomendasi road engineering\n\n"
                        "⚠️ Akurasi ~65-75%", chat_id)
                 elif coord:
