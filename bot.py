@@ -5,14 +5,19 @@ import requests
 import logging
 import time
 import re
+from datetime import datetime
 
 TELEGRAM_TOKEN = "8385287062:AAGgwYA0l7-Cuq4jA7dgcy5GkFAvDp7X1GM"
-TELEGRAM_CHAT_ID = "1145085024"
+ADMIN_ID = "1145085024"  # admin untuk approve
+USERS_FILE = "users.json"
+DAILY_LIMIT = 20
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 last_update_id = 0
+
+# ================= EARTH ENGINE =================
 
 service_account = json.loads(os.environ["GEE_KEY"])
 
@@ -23,19 +28,82 @@ credentials = ee.ServiceAccountCredentials(
 
 ee.Initialize(credentials)
 
-
 # ================= TELEGRAM =================
 
 def tg(msg, chat_id=None):
-
-    cid = chat_id or TELEGRAM_CHAT_ID
-
+    cid = chat_id or ADMIN_ID
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
         json={"chat_id": cid, "text": msg, "parse_mode": "HTML"},
         timeout=30
     )
 
+# ================= USER STORAGE =================
+
+def load_users():
+
+    if not os.path.exists(USERS_FILE):
+
+        return {
+            "approved": [],
+            "pending": [],
+            "usage": {}
+        }
+
+    with open(USERS_FILE, "r") as f:
+        return json.load(f)
+
+def save_users(data):
+
+    with open(USERS_FILE, "w") as f:
+        json.dump(data, f)
+
+# ================= USER CHECK =================
+
+def check_user(chat_id):
+
+    users = load_users()
+
+    if chat_id in users["approved"]:
+        return "approved"
+
+    if chat_id in users["pending"]:
+        return "pending"
+
+    users["pending"].append(chat_id)
+
+    save_users(users)
+
+    tg(
+        f"⚠ <b>User baru meminta akses</b>\n"
+        f"ID: <code>{chat_id}</code>\n\n"
+        f"/approve {chat_id}"
+    )
+
+    return "new"
+
+# ================= QUOTA =================
+
+def check_quota(chat_id):
+
+    users = load_users()
+
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+
+    if chat_id not in users["usage"]:
+        users["usage"][chat_id] = {}
+
+    if today not in users["usage"][chat_id]:
+        users["usage"][chat_id][today] = 0
+
+    if users["usage"][chat_id][today] >= DAILY_LIMIT:
+        return False
+
+    users["usage"][chat_id][today] += 1
+
+    save_users(users)
+
+    return True
 
 # ================= LOCATION =================
 
@@ -47,11 +115,7 @@ def get_location(lat, lon):
 
         r = requests.get(
             url,
-            params={
-                "lat": lat,
-                "lon": lon,
-                "format": "json"
-            },
+            params={"lat": lat, "lon": lon, "format": "json"},
             headers={"User-Agent": "soilbot"}
         )
 
@@ -64,9 +128,7 @@ def get_location(lat, lon):
         return f"{city}, {state}, {country}"
 
     except:
-
         return "Lokasi tidak diketahui"
-
 
 # ================= ROAD =================
 
@@ -83,7 +145,6 @@ def get_road(lat, lon):
         """
 
         r = requests.post(url, data=q, timeout=20)
-
         data = r.json()
 
         if not data["elements"]:
@@ -92,9 +153,7 @@ def get_road(lat, lon):
         return data["elements"][0]["tags"].get("name")
 
     except:
-
         return None
-
 
 # ================= SOIL PROFILE =================
 
@@ -102,7 +161,7 @@ def get_soil_profile(lat, lon):
 
     point = ee.Geometry.Point([lon, lat])
 
-    depths = ["0-5cm", "5-15cm", "15-30cm", "30-60cm", "60-100cm"]
+    depths = ["0-5cm","5-15cm","15-30cm","30-60cm","60-100cm"]
 
     clay = ee.Image("projects/soilgrids-isric/clay_mean")
     sand = ee.Image("projects/soilgrids-isric/sand_mean")
@@ -114,11 +173,11 @@ def get_soil_profile(lat, lon):
 
     for d in depths:
 
-        img = clay.select(f"clay_{d}_mean") \
-            .addBands(sand.select(f"sand_{d}_mean")) \
-            .addBands(silt.select(f"silt_{d}_mean")) \
-            .addBands(bdod.select(f"bdod_{d}_mean")) \
-            .addBands(soc.select(f"soc_{d}_mean"))
+        img = clay.select(f"clay_{d}_mean")\
+        .addBands(sand.select(f"sand_{d}_mean"))\
+        .addBands(silt.select(f"silt_{d}_mean"))\
+        .addBands(bdod.select(f"bdod_{d}_mean"))\
+        .addBands(soc.select(f"soc_{d}_mean"))
 
         vals = img.reduceRegion(
             reducer=ee.Reducer.mean(),
@@ -129,300 +188,67 @@ def get_soil_profile(lat, lon):
         ).getInfo()
 
         profile[d] = {
-            "clay": vals.get(f"clay_{d}_mean", 0) / 10,
-            "sand": vals.get(f"sand_{d}_mean", 0) / 10,
-            "silt": vals.get(f"silt_{d}_mean", 0) / 10,
-            "bdod": vals.get(f"bdod_{d}_mean", 0) / 100,
-            "soc": vals.get(f"soc_{d}_mean", 0) / 100
+            "clay": vals.get(f"clay_{d}_mean",0)/10,
+            "sand": vals.get(f"sand_{d}_mean",0)/10,
+            "silt": vals.get(f"silt_{d}_mean",0)/10,
+            "bdod": vals.get(f"bdod_{d}_mean",0)/100,
+            "soc": vals.get(f"soc_{d}_mean",0)/100
         }
 
     return profile
 
+# ================= MODEL =================
 
-# ================= TERRAIN =================
+def classify_soil(clay,sand,silt):
 
-def get_slope(lat, lon):
-
-    point = ee.Geometry.Point([lon, lat])
-
-    dem = ee.Image("USGS/SRTMGL1_003")
-
-    slope = ee.Terrain.slope(dem)
-
-    val = slope.reduceRegion(
-        reducer=ee.Reducer.mean(),
-        geometry=point,
-        scale=30
-    ).get("slope")
-
-    return ee.Number(val).getInfo()
-
-
-# ================= RAIN =================
-
-def get_rain(lat, lon):
-
-    point = ee.Geometry.Point([lon, lat])
-
-    rain = ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY") \
-        .filterDate("2015-01-01", "2024-01-01") \
-        .sum()
-
-    val = rain.reduceRegion(
-        reducer=ee.Reducer.mean(),
-        geometry=point,
-        scale=5000
-    ).get("precipitation")
-
-    return ee.Number(val).getInfo() / 9
-
-
-def rain_class(mm):
-
-    if mm < 1000:
-        return "rendah"
-    if mm < 2000:
-        return "sedang"
-    if mm < 3000:
-        return "tinggi"
-
-    return "sangat tinggi"
-
-
-# ================= HARD LAYER =================
-
-def estimate_hard_layer(profile):
-
-    d60 = profile["60-100cm"]["bdod"]
-
-    if d60 >= 1.45:
-        return "±0.8 m"
-
-    if d60 >= 1.38:
-        return "±1.0 m"
-
-    if d60 >= 1.32:
-        return "±1.3 m"
-
-    if d60 >= 1.28:
-        return "±1.6 m"
-
-    return "> 2 m"
-
-
-# ================= SOIL CLASS =================
-
-def classify_soil(clay, sand, silt):
-
-    if clay > 40 and silt > 40:
+    if clay>40 and silt>40:
         return "Lempung Lanauan"
 
-    if clay > 40:
+    if clay>40:
         return "Lempung"
 
-    if clay > 30 and sand > 40:
+    if clay>30 and sand>40:
         return "Lempung Berpasir"
 
-    if silt > 50:
-        return "Lanau"
-
-    if sand > 60:
+    if sand>60:
         return "Pasir"
+
+    if silt>50:
+        return "Lanau"
 
     return "Tanah campuran"
 
+def estimate_cbr(clay,sand):
 
-# ================= PEAT =================
-
-def detect_peat(soc, bdod):
-
-    if soc >= 20 and bdod <= 1.2:
-        return True
-
-    return False
-
-
-# ================= SOFT SOIL =================
-
-def detect_soft(clay, bdod, soc):
-
-    score = 0
-
-    if bdod < 1.1:
-        score += 1
-
-    if clay > 40:
-        score += 1
-
-    if soc > 15:
-        score += 1
-
-    return score >= 2
-
-
-# ================= EXPANSIVE =================
-
-def expansive(clay):
-
-    return clay > 45
-
-
-# ================= CBR =================
-
-def estimate_cbr(clay, sand, silt, soc, rain):
-
-    if soc > 20:
-        cbr = 2
-
-    elif clay > 45:
-        cbr = 3
-
-    elif clay > 30:
-        cbr = 5
-
-    elif silt > 50:
-        cbr = 6
-
-    elif sand > 60:
-        cbr = 15
-
-    else:
-        cbr = 8
-
-    if rain > 2500:
-        cbr *= 0.8
-
-    return round(cbr, 1)
-
-
-# ================= IMPACT =================
-
-def impacts(clay, sand, rain, peat, exp):
-
-    out = []
-
-    if peat:
-        out.append("Penurunan tanah besar akibat tanah organik")
-
-    if clay > 35:
-        out.append("Retak reflektif akibat kembang susut lempung")
-
-    if clay > 30:
-        out.append("Rutting atau ambles akibat daya dukung rendah")
-
-    if exp:
-        out.append("Potensi heave akibat lempung ekspansif")
-
-    if rain > 2000:
-        out.append("Genangan air saat musim hujan")
-
-    if sand > 60:
-        out.append("Erosi bahu jalan akibat material pasir")
-
-    return out
-
-
-# ================= RECOMMEND =================
-
-def recommendations(clay, sand, cbr, peat):
-
-    if peat:
-        return [
-            "Perbaikan tanah gambut (soil replacement)",
-            "Preloading + vertical drain",
-            "Geotextile / geogrid reinforcement"
-        ]
-
-    if cbr < 3:
-        return [
-            "Perkuatan tanah dasar",
-            "Geogrid reinforcement"
-        ]
-
-    if clay > 40:
-        return [
-            "Stabilisasi kapur 5–8%",
-            "Geotextile pada subgrade",
-            "Drainase baik"
-        ]
-
-    if sand > 60:
-        return [
-            "Pemadatan tinggi",
-            "Stabilisasi semen"
-        ]
-
-    return [
-        "Perkerasan standar",
-        "Drainase tepi jalan"
-    ]
-
-
-# ================= TEST =================
-
-def tests(clay, sand):
-
-    t = ["Field CBR"]
-
-    if clay > 30:
-        t.append("Atterberg limits")
-
-    if sand > 50:
-        t.append("Sand cone test")
-
-    t.append("DCP test")
-    t.append("Sondir / CPT")
-
-    return t
-
+    if clay>45:
+        return 3
+    if clay>30:
+        return 5
+    if sand>60:
+        return 15
+    return 8
 
 # ================= ANALYSIS =================
 
-def analyze_soil(lat, lon, chat_id):
+def analyze_soil(lat,lon,chat_id):
 
-    tg("⏳ Menganalisis lokasi...", chat_id)
+    tg("⏳ Menganalisis lokasi...",chat_id)
 
-    profile = get_soil_profile(lat, lon)
+    profile = get_soil_profile(lat,lon)
 
-    location = get_location(lat, lon)
+    location = get_location(lat,lon)
 
-    road = get_road(lat, lon)
-
-    rain = get_rain(lat, lon)
-
-    slope = get_slope(lat, lon)
+    road = get_road(lat,lon)
 
     clay = profile["30-60cm"]["clay"]
     sand = profile["30-60cm"]["sand"]
     silt = profile["30-60cm"]["silt"]
-    bdod = profile["30-60cm"]["bdod"]
-    soc = profile["30-60cm"]["soc"]
 
-    soil_type = classify_soil(clay, sand, silt)
+    soil_type = classify_soil(clay,sand,silt)
 
-    peat = detect_peat(profile["0-5cm"]["soc"], profile["0-5cm"]["bdod"])
+    cbr = estimate_cbr(clay,sand)
 
-    exp = expansive(clay)
-
-    soft = detect_soft(clay, bdod, soc)
-
-    cbr = estimate_cbr(clay, sand, silt, soc, rain)
-
-    hard = estimate_hard_layer(profile)
-
-    imp = impacts(clay, sand, rain, peat, exp)
-
-    rec = recommendations(clay, sand, cbr, peat)
-
-    tst = tests(clay, sand)
-
-    peat_txt = "🌱 Terindikasi gambut" if peat else "🌱 Tidak terindikasi gambut"
-
-    soft_txt = "🚨 Subgrade sangat lunak" if soft else "🟢 Subgrade relatif normal"
-
-    exp_txt = "⚠ Lempung ekspansif" if exp else "🟢 Tidak ekspansif"
-
-    msg = f"""
+    msg=f"""
 🌍 <b>LAPORAN INTERPRETASI TANAH — AI ANALYSIS</b>
 
 📍 Koordinat
@@ -436,37 +262,21 @@ def analyze_soil(lat, lon, chat_id):
 
 ━━━━━━━━━━━━
 
-🔎 <b>RINGKASAN CEPAT</b>
-
 🪨 Jenis tanah dominan
 <b>{soil_type}</b>
 
 🚧 Estimasi CBR
 <b>{cbr}%</b>
 
-🌧 Curah hujan
-<b>{rain:.0f} mm/tahun ({rain_class(rain)})</b>
-
-⛰ Kemiringan lereng
-<b>{slope:.1f}°</b>
-
-🧱 Perkiraan tanah relatif keras
-<b>{hard}</b>
-
-{peat_txt}
-{soft_txt}
-{exp_txt}
-
 ━━━━━━━━━━━━
-
-🪨 <b>PROFIL TANAH (hingga 1 m)</b>
+🪨 <b>PROFIL TANAH</b>
 """
 
-    for d, data in profile.items():
+    for d,data in profile.items():
 
-        soil = classify_soil(data["clay"], data["sand"], data["silt"])
+        soil = classify_soil(data["clay"],data["sand"],data["silt"])
 
-        msg += f"""
+        msg+=f"""
 {d}
 Jenis tanah : {soil}
 Clay {data["clay"]:.1f} %
@@ -476,23 +286,7 @@ Bulk Density {data["bdod"]:.2f} g/cm³
 Organic Carbon {data["soc"]:.1f} %
 """
 
-    msg += "\n━━━━━━━━━━━━\n⚠ <b>DAMPAK TERHADAP PERKERASAN</b>\n"
-
-    for i, x in enumerate(imp, 1):
-        msg += f"{i}. {x}\n"
-
-    msg += "\n🛠 <b>REKOMENDASI PENANGANAN</b>\n"
-
-    for x in rec:
-        msg += f"• {x}\n"
-
-    msg += "\n🔬 <b>PENGUJIAN TANAH</b>\n"
-
-    for x in tst:
-        msg += f"• {x}\n"
-
-    tg(msg, chat_id)
-
+    tg(msg,chat_id)
 
 # ================= TELEGRAM LOOP =================
 
@@ -504,40 +298,81 @@ def check_messages():
 
         try:
 
-            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={last_update_id+1}&timeout=30"
+            url=f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={last_update_id+1}&timeout=30"
 
-            r = requests.get(url, timeout=35).json()
+            r=requests.get(url,timeout=35).json()
 
-            for update in r.get("result", []):
+            for update in r.get("result",[]):
 
-                last_update_id = update["update_id"]
+                last_update_id=update["update_id"]
 
-                msg = update.get("message", {})
-                chat_id = str(msg.get("chat", {}).get("id", ""))
-                text = msg.get("text", "").strip()
+                msg=update.get("message",{})
 
-                coord = re.search(r"(-?\d+\.?\d*)[, ]+(-?\d+\.?\d*)", text)
+                chat_id=str(msg.get("chat",{}).get("id",""))
+
+                text=msg.get("text","").strip()
+
+                # ===== ADMIN COMMAND =====
+
+                if text.startswith("/approve") and chat_id==ADMIN_ID:
+
+                    uid=text.split(" ")[1]
+
+                    users=load_users()
+
+                    if uid in users["pending"]:
+                        users["pending"].remove(uid)
+
+                    if uid not in users["approved"]:
+                        users["approved"].append(uid)
+
+                    save_users(users)
+
+                    tg(f"✅ User {uid} disetujui")
+
+                    tg("🎉 Akses bot telah disetujui.",uid)
+
+                    continue
+
+                # ===== USER CHECK =====
+
+                status=check_user(chat_id)
+
+                if status=="new":
+
+                    tg("⛔ Bot memerlukan izin admin.",chat_id)
+                    continue
+
+                if status=="pending":
+
+                    tg("⏳ Menunggu persetujuan admin.",chat_id)
+                    continue
+
+                if not check_quota(chat_id):
+
+                    tg("⚠ Kuota harian habis.",chat_id)
+                    continue
+
+                # ===== COORDINATE =====
+
+                coord=re.search(r"(-?\d+\.?\d*)[, ]+(-?\d+\.?\d*)",text)
 
                 if coord:
 
-                    lat = float(coord.group(1))
-                    lon = float(coord.group(2))
+                    lat=float(coord.group(1))
+                    lon=float(coord.group(2))
 
-                    analyze_soil(lat, lon, chat_id)
+                    analyze_soil(lat,lon,chat_id)
 
                 else:
 
-                    tg(
-                        "📍 Kirim koordinat lokasi\n<code>-7.6048,111.9102</code>",
-                        chat_id
-                    )
+                    tg("📍 Kirim koordinat\n<code>-7.6048,111.9102</code>",chat_id)
 
         except Exception as e:
 
             log.error(f"Telegram loop error: {e}")
 
         time.sleep(2)
-
 
 # ================= MAIN =================
 
@@ -547,11 +382,10 @@ def main():
 
     tg(
         "🤖 <b>AI Analisis Tanah siap digunakan</b>\n\n"
-        "Kirim koordinat lokasi:\n"
-        "<code>-7.6048,111.9102</code>"
+        "Bot menggunakan sistem approval admin.\n"
+        "Kirim pesan untuk meminta akses."
     )
 
     check_messages()
-
 
 main()
