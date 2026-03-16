@@ -6,15 +6,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 last_update_id = 0
 
-DEPTHS = [
-    ("0-5 cm",     "Subgrade Permukaan", "0-5cm",    75),
-    ("5-15 cm",    "Zona Drainase",      "5-15cm",   74),
-    ("15-30 cm",   "Subbase Dangkal",    "15-30cm",  73),
-    ("30-60 cm",   "Subgrade Utama",     "30-60cm",  72),
-    ("60-100 cm",  "Lapisan Dalam",      "60-100cm", 68),
-    ("100-200 cm", "Pondasi Dalam",      "100-200cm",65),
-]
-
 def tg(msg, chat_id=None):
     cid = chat_id or TELEGRAM_CHAT_ID
     requests.post(
@@ -23,34 +14,33 @@ def tg(msg, chat_id=None):
         timeout=15
     )
 
-def get_soil(lat, lon, depth):
-    props = ["clay", "sand", "silt", "bdod", "soc", "cec"]
+def get_soil_all(lat, lon):
     url = "https://api-test.openepi.io/soil/property"
-    params = {
-        "lat": lat, "lon": lon,
-        "depths": depth,
-        "properties": ",".join(props)
-    }
-    r = requests.get(url, params=params, timeout=20)
+    params = [
+        ("lon", lon), ("lat", lat),
+        ("depths", "0-5cm"), ("depths", "5-15cm"), ("depths", "15-30cm"),
+        ("depths", "30-60cm"), ("depths", "60-100cm"), ("depths", "100-200cm"),
+        ("properties", "clay"), ("properties", "sand"), ("properties", "silt"),
+        ("properties", "bdod"), ("properties", "soc"), ("properties", "cec"),
+        ("values", "mean"),
+    ]
+    r = requests.get(url, params=params, timeout=25)
     r.raise_for_status()
     data = r.json()
-    result = {}
-    layers = data.get("properties", {}).get("layers", [])
-    for layer in layers:
+    all_depths = {}
+    for layer in data.get("properties", {}).get("layers", []):
         name = layer.get("name")
+        d_factor = layer.get("unit_measure", {}).get("d_factor", 1)
         for d in layer.get("depths", []):
-            if d.get("label") == depth:
-                val = d.get("values", {}).get("mean")
-                if val is not None:
-                    if name == "clay":  result["clay"] = val / 10
-                    elif name == "sand": result["sand"] = val / 10
-                    elif name == "silt": result["silt"] = val / 10
-                    elif name == "bdod": result["bdod"] = val / 100
-                    elif name == "soc":  result["soc"]  = val / 10
-                    elif name == "cec":  result["cec"]  = val / 10
-    if "clay" in result and "sand" in result and "silt" not in result:
-        result["silt"] = max(0, 100 - result["clay"] - result["sand"])
-    return result
+            label = d.get("label")
+            val = d.get("values", {}).get("mean")
+            if val is None: continue
+            if label not in all_depths: all_depths[label] = {}
+            all_depths[label][name] = val / d_factor
+    for label, d in all_depths.items():
+        if "clay" in d and "sand" in d and "silt" not in d:
+            d["silt"] = max(0, 100 - d["clay"] - d["sand"])
+    return all_depths
 
 def classify_soil(clay, sand, silt):
     if clay >= 40 and silt >= 40: return "Silty Clay"
@@ -101,7 +91,7 @@ def calc_risks(clay, sand, silt, bdod, soc, cec):
     peat = is_peat(soc, bdod)
     if peat:
         risks += [
-            ("Settlement Ekstrem", 95, "🔴", "Gambut kompresibel → jalan amblas masif, tidak stabil"),
+            ("Settlement Ekstrem", 95, "🔴", "Gambut kompresibel → jalan amblas masif"),
             ("Bearing Capacity Gagal", 92, "🔴", "Daya dukung hampir nol → perlu cerucuk/replacement"),
             ("Rutting Parah", 90, "🔴", "Beban lalu lintas melesak ke gambut"),
             ("Kebakaran Bawah Tanah", 60, "🟡", "Gambut kering → rongga bawah jalan"),
@@ -178,25 +168,36 @@ def bar(pct, length=10):
     return "█"*filled + "░"*(length-filled)
 
 def analyze_soil(lat, lon, chat_id):
-    tg(f"⏳ Menganalisis tanah...\n📍 {lat}, {lon}\nMohon tunggu ~30 detik.", chat_id)
-    all_data = {}
-    for label, role, depth, acc in DEPTHS:
-        try:
-            d = get_soil(lat, lon, depth)
-            if d and "clay" in d:
-                all_data[depth] = (label, role, acc, d)
-        except Exception as e:
-            log.error(f"Error {depth}: {e}")
-
-    if not all_data:
-        tg("❌ Gagal ambil data. Coba lagi beberapa menit.", chat_id)
+    tg(f"⏳ Menganalisis tanah...\n📍 {lat}, {lon}\nMohon tunggu ~20 detik.", chat_id)
+    try:
+        all_depths = get_soil_all(lat, lon)
+    except Exception as e:
+        log.error(f"API error: {e}")
+        tg(f"❌ Gagal ambil data: {str(e)[:100]}\nCoba lagi beberapa menit.", chat_id)
         return
+
+    if not all_depths:
+        tg("❌ Data kosong dari API.", chat_id)
+        return
+
+    depth_order = ["0-5cm","5-15cm","15-30cm","30-60cm","60-100cm","100-200cm"]
+    depth_meta = {
+        "0-5cm":    ("0-5 cm",     "Subgrade Permukaan", 75),
+        "5-15cm":   ("5-15 cm",    "Zona Drainase",      74),
+        "15-30cm":  ("15-30 cm",   "Subbase Dangkal",    73),
+        "30-60cm":  ("30-60 cm",   "Subgrade Utama",     72),
+        "60-100cm": ("60-100 cm",  "Lapisan Dalam",      68),
+        "100-200cm":("100-200 cm", "Pondasi Dalam",      65),
+    }
 
     msg = (f"📍 <b>LAPORAN TANAH — ROAD ENGINEERING</b>\n"
            f"🌐 Koordinat: {lat}, {lon}\n"
-           f"🔬 Sumber: OpenEPI / SoilGrids (ISRIC)\n\n")
+           f"🔬 Sumber: OpenEPI/SoilGrids (ISRIC)\n\n")
 
-    for depth, (label, role, acc, d) in all_data.items():
+    for depth_key in depth_order:
+        if depth_key not in all_depths: continue
+        d = all_depths[depth_key]
+        label, role, acc = depth_meta[depth_key]
         clay = d.get("clay", 0)
         sand = d.get("sand", 0)
         silt = d.get("silt", 0)
@@ -218,8 +219,7 @@ def analyze_soil(lat, lon, chat_id):
         if cec:  msg += f"CEC: {cec:.1f} cmolc/kg\n"
         msg += f"Ekspansif: {exp} {exp_emoji} | Peat: {peat_flag}\n\n"
 
-    main = all_data.get("30-60cm", list(all_data.values())[0])
-    _, _, _, md = main
+    md = all_depths.get("30-60cm", all_depths[list(all_depths.keys())[0]])
     clay = md.get("clay", 0)
     sand = md.get("sand", 0)
     silt = md.get("silt", 0)
@@ -240,8 +240,7 @@ def analyze_soil(lat, lon, chat_id):
     recs = recommend(clay, sand, silt, bdod, soc, cec)
     msg += f"\n━━━━━━━━━━━━━━━\n"
     msg += "💡 <b>REKOMENDASI ROAD ENGINEERING</b>\n"
-    for r in recs:
-        msg += f"• {r}\n"
+    for r in recs: msg += f"• {r}\n"
 
     msg += ("\n━━━━━━━━━━━━━━━\n"
             "⚠️ <i>Estimasi ~65-75% akurasi.\n"
@@ -266,10 +265,9 @@ def check_messages():
                     tg("🌍 <b>Soil Analyzer — Road Engineering</b>\n\n"
                        "Kirim koordinat:\n<code>-7.6048, 111.9102</code>\n\n"
                        "📊 Output:\n• Jenis tanah 6 kedalaman\n"
-                       "• Clay/Sand/Silt % + Bulk Density + CEC\n"
+                       "• Clay/Sand/Silt% + Bulk Density + CEC\n"
                        "• Deteksi Peat & Ekspansif\n"
-                       "• Estimasi CBR\n"
-                       "• Risiko jalan + persentase\n"
+                       "• Estimasi CBR\n• Risiko jalan + %\n"
                        "• Rekomendasi road engineering\n\n"
                        "⚠️ Akurasi ~65-75%", chat_id)
                 elif coord:
