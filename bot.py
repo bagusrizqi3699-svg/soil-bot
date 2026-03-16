@@ -17,8 +17,6 @@ log=logging.getLogger(__name__)
 
 last_update_id=0
 
-# ================= EARTH ENGINE =================
-
 service_account=json.loads(os.environ["GEE_KEY"])
 
 credentials=ee.ServiceAccountCredentials(
@@ -28,35 +26,25 @@ credentials=ee.ServiceAccountCredentials(
 
 ee.Initialize(credentials)
 
-# ================= TELEGRAM =================
-
 def tg(msg,chat_id):
-
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
         json={"chat_id":chat_id,"text":msg,"parse_mode":"HTML"},
         timeout=30
     )
 
-# ================= USER STORAGE =================
-
 def load_users():
 
     if not os.path.exists(USERS_FILE):
-
         return {"approved":[ADMIN_ID],"pending":[],"usage":{}}
 
     with open(USERS_FILE,"r") as f:
-
         return json.load(f)
 
 def save_users(data):
 
     with open(USERS_FILE,"w") as f:
-
         json.dump(data,f)
-
-# ================= USER CHECK =================
 
 def check_user(chat_id):
 
@@ -72,14 +60,11 @@ def check_user(chat_id):
         return "pending"
 
     users["pending"].append(chat_id)
-
     save_users(users)
 
     tg(f"⚠ User baru meminta akses\nID: {chat_id}\n/approve {chat_id}",ADMIN_ID)
 
     return "new"
-
-# ================= QUOTA =================
 
 def check_quota(chat_id):
 
@@ -104,12 +89,9 @@ def check_quota(chat_id):
 
     return True
 
-# ================= LOCATION =================
-
 def get_location(lat,lon):
 
     try:
-
         r=requests.get(
             "https://nominatim.openstreetmap.org/reverse",
             params={"lat":lat,"lon":lon,"format":"json"},
@@ -126,8 +108,6 @@ def get_location(lat,lon):
 
     except:
         return "Tidak terdeteksi"
-
-# ================= ROAD =================
 
 def get_road(lat,lon):
 
@@ -150,8 +130,6 @@ def get_road(lat,lon):
 
     except:
         return None
-
-# ================= SOIL PROFILE =================
 
 def get_soil_profile(lat,lon):
 
@@ -192,14 +170,11 @@ def get_soil_profile(lat,lon):
 
     return profile
 
-# ================= TERRAIN =================
-
 def get_slope(lat,lon):
 
     point=ee.Geometry.Point([lon,lat])
 
     dem=ee.Image("USGS/SRTMGL1_003")
-
     slope=ee.Terrain.slope(dem)
 
     val=slope.reduceRegion(
@@ -209,8 +184,6 @@ def get_slope(lat,lon):
     ).get("slope")
 
     return ee.Number(val).getInfo()
-
-# ================= RAIN =================
 
 def get_rain(lat,lon):
 
@@ -228,39 +201,38 @@ def get_rain(lat,lon):
 
     return ee.Number(val).getInfo()/9
 
-# ================= INTERPRETATION =================
-
 def classify_soil(clay,sand,silt):
 
-    if clay>40 and silt>40:
-        return "Lempung lanauan"
+    if clay>=sand and clay>=silt:
+        if silt>sand:
+            return "Lempung lanauan"
+        else:
+            return "Lempung berpasir"
 
-    if clay>40:
-        return "Lempung"
+    if silt>=clay and silt>=sand:
+        if clay>sand:
+            return "Lanau berlempung"
+        else:
+            return "Lanau berpasir"
 
-    if clay>30 and sand>40:
-        return "Lempung berpasir"
-
-    if sand>60:
-        return "Pasir"
-
-    if silt>50:
-        return "Lanau"
-
-    return "Tanah campuran"
+    if sand>=clay and sand>=silt:
+        if clay>silt:
+            return "Pasir berlempung"
+        else:
+            return "Pasir berlanau"
 
 def detect_peat(soc,bdod):
-
     return soc>=20 and bdod<=1.2
 
-def estimate_cbr(clay,sand,silt,soc,rain):
+def estimate_cbr(clay,sand,silt,bdod,soc,rain):
 
-    if soc>20:
-        cbr=1.5
-    elif clay>45:
+    if soc>20 and bdod<1.15:
+        return 1.0
+
+    if clay>45:
         cbr=3
     elif clay>35:
-        cbr=4.5
+        cbr=4
     elif clay>25:
         cbr=6
     elif sand>60:
@@ -268,8 +240,13 @@ def estimate_cbr(clay,sand,silt,soc,rain):
     else:
         cbr=8
 
+    if bdod>1.35:
+        cbr*=1.3
+    elif bdod<1.1:
+        cbr*=0.7
+
     if rain>2500:
-        cbr*=0.8
+        cbr*=0.85
 
     return round(cbr,1)
 
@@ -288,7 +265,31 @@ def estimate_hard_layer(profile):
 
     return ">2 m"
 
-# ================= ANALYSIS =================
+def model_confidence(clay,sand,silt,bdod):
+
+    score=70
+
+    if abs(clay-silt)<5 and abs(clay-sand)<5:
+        score-=10
+
+    if bdod<1.1:
+        score-=10
+
+    if bdod>1.35:
+        score+=5
+
+    score=max(60,min(score,85))
+
+    return score
+
+def detect_soft(clay,bdod):
+    return clay>35 and bdod<1.2
+
+def detect_expansive(clay):
+    return clay>40
+
+def detect_liquefaction(sand,bdod):
+    return sand>65 and bdod<1.4
 
 def analyze_soil(lat,lon,chat_id):
 
@@ -306,14 +307,21 @@ def analyze_soil(lat,lon,chat_id):
     sand=profile["30-60cm"]["sand"]
     silt=profile["30-60cm"]["silt"]
     soc=profile["30-60cm"]["soc"]
+    bdod=profile["30-60cm"]["bdod"]
 
     soil_type=classify_soil(clay,sand,silt)
 
     peat=detect_peat(profile["0-5cm"]["soc"],profile["0-5cm"]["bdod"])
 
-    cbr=estimate_cbr(clay,sand,silt,soc,rain)
+    cbr=estimate_cbr(clay,sand,silt,bdod,soc,rain)
 
     hard=estimate_hard_layer(profile)
+
+    confidence=model_confidence(clay,sand,silt,bdod)
+
+    soft=detect_soft(clay,bdod)
+    expansive=detect_expansive(clay)
+    liquefaction=detect_liquefaction(sand,bdod)
 
     msg=f"""
 🌍 <b>LAPORAN INTERPRETASI TANAH — AI ANALYSIS</b>
@@ -345,10 +353,13 @@ def analyze_soil(lat,lon,chat_id):
 🧱 Perkiraan tanah keras
 <b>{hard}</b>
 
-{"🌱 Indikasi gambut" if peat else "🌱 Tidak terindikasi gambut"}
+🤖 Kepercayaan AI
+<b>{confidence}%</b>
 
-━━━━━━━━━━━━
-🪨 <b>PROFIL TANAH (0–1 m)</b>
+{"🌱 Indikasi gambut" if peat else "🌱 Tidak terindikasi gambut"}
+{"⚠ Tanah lunak" if soft else ""}
+{"⚠ Tanah ekspansif" if expansive else ""}
+{"⚠ Potensi likuifaksi" if liquefaction else ""}
 """
 
     for d,data in profile.items():
@@ -356,6 +367,7 @@ def analyze_soil(lat,lon,chat_id):
         soil=classify_soil(data["clay"],data["sand"],data["silt"])
 
         msg+=f"""
+
 {d}
 Jenis tanah : {soil}
 Clay {data["clay"]:.1f} %
@@ -373,18 +385,12 @@ Organic Carbon {data["soc"]:.1f} %
 1. Retak reflektif akibat kembang susut tanah
 2. Rutting / ambles akibat daya dukung rendah
 3. Genangan air saat hujan tinggi
-"""
-
-    msg+=f"""
 
 🛠 <b>REKOMENDASI PENANGANAN</b>
 
 • Stabilisasi kapur 5–8% atau semen
 • Geotextile pada subgrade
 • Drainase baik
-"""
-
-    msg+=f"""
 
 🔬 <b>PENGUJIAN TANAH</b>
 
@@ -392,11 +398,16 @@ Organic Carbon {data["soc"]:.1f} %
 • Atterberg limits
 • DCP test
 • Sondir / CPT
+
+━━━━━━━━━━━━
+🤖 <b>CATATAN ANALISIS AI</b>
+
+Analisis ini merupakan <b>preliminary assessment</b> berbasis data SoilGrids melalui Google Earth Engine.
+
+Hasil digunakan sebagai indikasi awal kondisi tanah dan tidak menggantikan investigasi geoteknik lapangan.
 """
 
     tg(msg,chat_id)
-
-# ================= TELEGRAM LOOP =================
 
 def check_messages():
 
@@ -465,8 +476,6 @@ def check_messages():
             log.error(e)
 
         time.sleep(2)
-
-# ================= MAIN =================
 
 def main():
 
