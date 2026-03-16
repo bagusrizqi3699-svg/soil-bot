@@ -6,30 +6,30 @@ import logging
 import time
 import re
 
-TELEGRAM_TOKEN = "8385287062:AAGgwYA0l7-Cuq4jA7dgcy5GkFAvDp7X1GM"
-TELEGRAM_CHAT_ID = "1145085024"
+TELEGRAM_TOKEN="8385287062:AAGgwYA0l7-Cuq4jA7dgcy5GkFAvDp7X1GM"
+TELEGRAM_CHAT_ID="1145085024"
 
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger(__name__)
-last_update_id = 0
+log=logging.getLogger(__name__)
+last_update_id=0
 
-service_account = json.loads(os.environ["GEE_KEY"])
+service_account=json.loads(os.environ["GEE_KEY"])
 
-credentials = ee.ServiceAccountCredentials(
+credentials=ee.ServiceAccountCredentials(
     service_account["client_email"],
     key_data=json.dumps(service_account)
 )
 
 ee.Initialize(credentials)
 
-def tg(msg, chat_id=None):
+def tg(msg,chat_id=None):
 
-    cid = chat_id or TELEGRAM_CHAT_ID
+    cid=chat_id or TELEGRAM_CHAT_ID
 
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        json={"chat_id": cid, "text": msg, "parse_mode": "HTML"},
-        timeout=25
+        json={"chat_id":cid,"text":msg,"parse_mode":"HTML"},
+        timeout=30
     )
 
 # =========================
@@ -76,7 +76,6 @@ def get_road(lat,lon):
         """
 
         r=requests.post(url,data=q,timeout=20)
-
         data=r.json()
 
         if not data["elements"]:
@@ -101,6 +100,7 @@ def get_soil_profile(lat,lon):
     sand=ee.Image("projects/soilgrids-isric/sand_mean")
     silt=ee.Image("projects/soilgrids-isric/silt_mean")
     bdod=ee.Image("projects/soilgrids-isric/bdod_mean")
+    soc=ee.Image("projects/soilgrids-isric/soc_mean")
 
     profile={}
 
@@ -109,7 +109,8 @@ def get_soil_profile(lat,lon):
         img=clay.select(f"clay_{d}_mean")\
         .addBands(sand.select(f"sand_{d}_mean"))\
         .addBands(silt.select(f"silt_{d}_mean"))\
-        .addBands(bdod.select(f"bdod_{d}_mean"))
+        .addBands(bdod.select(f"bdod_{d}_mean"))\
+        .addBands(soc.select(f"soc_{d}_mean"))
 
         vals=img.reduceRegion(
             reducer=ee.Reducer.mean(),
@@ -123,13 +124,14 @@ def get_soil_profile(lat,lon):
             "clay":vals.get(f"clay_{d}_mean",0)/10,
             "sand":vals.get(f"sand_{d}_mean",0)/10,
             "silt":vals.get(f"silt_{d}_mean",0)/10,
-            "bdod":vals.get(f"bdod_{d}_mean",0)/100
+            "bdod":vals.get(f"bdod_{d}_mean",0)/100,
+            "soc":vals.get(f"soc_{d}_mean",0)/10
         }
 
     return profile
 
 # =========================
-# SOIL CLASSIFICATION
+# CLASSIFY SOIL
 # =========================
 
 def classify_soil(clay,sand,silt):
@@ -149,7 +151,7 @@ def classify_soil(clay,sand,silt):
     return "Tanah campuran"
 
 # =========================
-# RAINFALL
+# RAIN
 # =========================
 
 def get_rain(lat,lon):
@@ -167,6 +169,49 @@ def get_rain(lat,lon):
     ).get("precipitation")
 
     return ee.Number(val).getInfo()/9
+
+def rain_class(mm):
+
+    if mm<1000:
+        return "rendah"
+
+    if mm<2000:
+        return "sedang"
+
+    if mm<3000:
+        return "tinggi"
+
+    return "sangat tinggi"
+
+# =========================
+# PEAT DETECTION
+# =========================
+
+def detect_peat(soc,bdod):
+
+    if soc>=20 and bdod<=1.0:
+        return True
+
+    return False
+
+# =========================
+# VERY SOFT SOIL
+# =========================
+
+def detect_soft(clay,bdod,soc):
+
+    score=0
+
+    if bdod<1.1:
+        score+=1
+
+    if clay>40:
+        score+=1
+
+    if soc>15:
+        score+=1
+
+    return score>=2
 
 # =========================
 # CBR
@@ -186,7 +231,7 @@ def estimate_cbr(clay,sand):
     return 8
 
 # =========================
-# IMPACT
+# IMPACTS
 # =========================
 
 def impacts(clay,sand,rain):
@@ -208,30 +253,28 @@ def impacts(clay,sand,rain):
     return out
 
 # =========================
-# RECOMMENDATION
+# RECOMMENDATIONS
 # =========================
 
-def recommendations(clay,sand,cbr):
+def recommendations(clay,sand,cbr,peat):
 
-    rec=[]
+    if peat:
+        return [
+        "Perbaikan tanah gambut (soil replacement)",
+        "Preloading + vertical drain",
+        "Geotextile / geogrid reinforcement"
+        ]
 
     if cbr<3:
-        rec+=["Perbaikan tanah (soil replacement)",
-              "Geogrid reinforcement"]
+        return ["Perbaikan tanah","Geogrid reinforcement"]
 
-    elif clay>40:
-        rec+=["Stabilisasi kapur 5–8%",
-              "Pemasangan geotextile"]
+    if clay>40:
+        return ["Stabilisasi kapur 5–8%","Pemasangan geotextile"]
 
-    elif sand>60:
-        rec+=["Pemadatan tinggi",
-              "Stabilisasi semen"]
+    if sand>60:
+        return ["Pemadatan tinggi","Stabilisasi semen"]
 
-    else:
-        rec+=["Perkerasan standar",
-              "Drainase tepi jalan"]
-
-    return rec
+    return ["Perkerasan standar","Drainase tepi jalan"]
 
 # =========================
 # TESTS
@@ -270,16 +313,25 @@ def analyze_soil(lat,lon,chat_id):
     clay=profile["30-60cm"]["clay"]
     sand=profile["30-60cm"]["sand"]
     silt=profile["30-60cm"]["silt"]
+    bdod=profile["30-60cm"]["bdod"]
 
     soil_type=classify_soil(clay,sand,silt)
 
     cbr=estimate_cbr(clay,sand)
 
+    peat=detect_peat(profile["0-5cm"]["soc"],profile["0-5cm"]["bdod"])
+
+    soft=detect_soft(clay,bdod,profile["30-60cm"]["soc"])
+
     imp=impacts(clay,sand,rain)
 
-    rec=recommendations(clay,sand,cbr)
+    rec=recommendations(clay,sand,cbr,peat)
 
     tst=tests(clay,sand)
+
+    peat_txt="🌱 Terindikasi gambut" if peat else "🌱 Tidak terindikasi gambut"
+
+    soft_txt="🚨 Subgrade sangat lunak" if soft else "🟢 Subgrade relatif normal"
 
     msg=f"""
 🌍 <b>LAPORAN INTERPRETASI TANAH — AI ANALYSIS</b>
@@ -306,6 +358,9 @@ def analyze_soil(lat,lon,chat_id):
 🌧 Curah hujan
 <b>{rain:.0f} mm/tahun</b>
 
+{peat_txt}
+{soft_txt}
+
 ━━━━━━━━━━━━
 
 🪨 <b>PROFIL TANAH (hingga 1 m)</b>
@@ -322,26 +377,22 @@ Clay {data["clay"]:.1f} %
 Sand {data["sand"]:.1f} %
 Silt {data["silt"]:.1f} %
 Bulk Density {data["bdod"]:.2f} g/cm³
+Organic Carbon {data["soc"]:.1f} %
 """
 
-    msg+="\n━━━━━━━━━━━━\n"
-
-    msg+="⚠ <b>DAMPAK TERHADAP PERKERASAN</b>\n"
+    msg+="\n━━━━━━━━━━━━\n⚠ <b>DAMPAK TERHADAP PERKERASAN</b>\n"
 
     for i,x in enumerate(imp,1):
-
         msg+=f"{i}. {x}\n"
 
     msg+="\n🛠 <b>REKOMENDASI PENANGANAN</b>\n"
 
     for x in rec:
-
         msg+=f"• {x}\n"
 
     msg+="\n🔬 <b>PENGUJIAN TANAH</b>\n"
 
     for x in tst:
-
         msg+=f"• {x}\n"
 
     tg(msg,chat_id)
