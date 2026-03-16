@@ -7,67 +7,69 @@ import time
 import re
 from datetime import datetime
 
-TELEGRAM_TOKEN = "8385287062:AAGgwYA0l7-Cuq4jA7dgcy5GkFAvDp7X1GM"
-ADMIN_ID = "1145085024"  # admin untuk approve
-USERS_FILE = "users.json"
-DAILY_LIMIT = 20
+TELEGRAM_TOKEN="YOUR_TOKEN"
+ADMIN_ID="YOUR_TELEGRAM_ID"
+USERS_FILE="users.json"
+DAILY_LIMIT=20
 
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger(__name__)
+log=logging.getLogger(__name__)
 
-last_update_id = 0
+last_update_id=0
 
-# ================= EARTH ENGINE =================
+service_account=json.loads(os.environ["GEE_KEY"])
 
-service_account = json.loads(os.environ["GEE_KEY"])
-
-credentials = ee.ServiceAccountCredentials(
+credentials=ee.ServiceAccountCredentials(
     service_account["client_email"],
     key_data=json.dumps(service_account)
 )
 
 ee.Initialize(credentials)
 
-# ================= TELEGRAM =================
+# ---------------- TELEGRAM ----------------
 
-def tg(msg, chat_id=None):
-    cid = chat_id or ADMIN_ID
+def tg(msg,chat_id):
+
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        json={"chat_id": cid, "text": msg, "parse_mode": "HTML"},
+        json={"chat_id":chat_id,"text":msg,"parse_mode":"HTML"},
         timeout=30
     )
 
-# ================= USER STORAGE =================
+# ---------------- USER STORAGE ----------------
 
 def load_users():
 
     if not os.path.exists(USERS_FILE):
 
-        return {
-            "approved": [],
-            "pending": [],
-            "usage": {}
-        }
+        return {"approved":[],"pending":[],"usage":{}}
 
-    with open(USERS_FILE, "r") as f:
+    with open(USERS_FILE,"r") as f:
+
         return json.load(f)
 
 def save_users(data):
 
-    with open(USERS_FILE, "w") as f:
-        json.dump(data, f)
+    with open(USERS_FILE,"w") as f:
 
-# ================= USER CHECK =================
+        json.dump(data,f)
+
+# ---------------- USER CHECK ----------------
 
 def check_user(chat_id):
 
-    users = load_users()
+    if chat_id==ADMIN_ID:
+
+        return "approved"
+
+    users=load_users()
 
     if chat_id in users["approved"]:
+
         return "approved"
 
     if chat_id in users["pending"]:
+
         return "pending"
 
     users["pending"].append(chat_id)
@@ -75,178 +77,284 @@ def check_user(chat_id):
     save_users(users)
 
     tg(
-        f"⚠ <b>User baru meminta akses</b>\n"
-        f"ID: <code>{chat_id}</code>\n\n"
-        f"/approve {chat_id}"
+        f"⚠ User baru meminta akses\nID: {chat_id}\n/approve {chat_id}",
+        ADMIN_ID
     )
 
     return "new"
 
-# ================= QUOTA =================
+# ---------------- QUOTA ----------------
 
 def check_quota(chat_id):
 
-    users = load_users()
+    if chat_id==ADMIN_ID:
 
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+        return True
+
+    users=load_users()
+
+    today=datetime.utcnow().strftime("%Y-%m-%d")
 
     if chat_id not in users["usage"]:
-        users["usage"][chat_id] = {}
+
+        users["usage"][chat_id]={}
 
     if today not in users["usage"][chat_id]:
-        users["usage"][chat_id][today] = 0
 
-    if users["usage"][chat_id][today] >= DAILY_LIMIT:
+        users["usage"][chat_id][today]=0
+
+    if users["usage"][chat_id][today]>=DAILY_LIMIT:
+
         return False
 
-    users["usage"][chat_id][today] += 1
+    users["usage"][chat_id][today]+=1
 
     save_users(users)
 
     return True
 
-# ================= LOCATION =================
+# ---------------- LOCATION ----------------
 
-def get_location(lat, lon):
+def get_location(lat,lon):
 
     try:
 
-        url = "https://nominatim.openstreetmap.org/reverse"
-
-        r = requests.get(
-            url,
-            params={"lat": lat, "lon": lon, "format": "json"},
-            headers={"User-Agent": "soilbot"}
+        r=requests.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={"lat":lat,"lon":lon,"format":"json"},
+            headers={"User-Agent":"soilbot"}
         )
 
-        addr = r.json()["address"]
+        addr=r.json()["address"]
 
-        city = addr.get("city") or addr.get("town") or addr.get("county") or ""
-        state = addr.get("state", "")
-        country = addr.get("country", "")
+        city=addr.get("city") or addr.get("town") or addr.get("county") or ""
+        state=addr.get("state","")
+        country=addr.get("country","")
 
         return f"{city}, {state}, {country}"
 
     except:
-        return "Lokasi tidak diketahui"
 
-# ================= ROAD =================
+        return "Tidak terdeteksi"
 
-def get_road(lat, lon):
+# ---------------- ROAD ----------------
+
+def get_road(lat,lon):
 
     try:
 
-        url = "https://overpass-api.de/api/interpreter"
-
-        q = f"""
+        q=f"""
         [out:json];
         way(around:100,{lat},{lon})["highway"];
         out tags 1;
         """
 
-        r = requests.post(url, data=q, timeout=20)
-        data = r.json()
+        r=requests.post("https://overpass-api.de/api/interpreter",data=q)
+
+        data=r.json()
 
         if not data["elements"]:
+
             return None
 
         return data["elements"][0]["tags"].get("name")
 
     except:
+
         return None
 
-# ================= SOIL PROFILE =================
+# ---------------- SOIL PROFILE ----------------
 
-def get_soil_profile(lat, lon):
+def get_soil_profile(lat,lon):
 
-    point = ee.Geometry.Point([lon, lat])
+    point=ee.Geometry.Point([lon,lat])
 
-    depths = ["0-5cm","5-15cm","15-30cm","30-60cm","60-100cm"]
+    depths=["0-5cm","5-15cm","15-30cm","30-60cm","60-100cm"]
 
-    clay = ee.Image("projects/soilgrids-isric/clay_mean")
-    sand = ee.Image("projects/soilgrids-isric/sand_mean")
-    silt = ee.Image("projects/soilgrids-isric/silt_mean")
-    bdod = ee.Image("projects/soilgrids-isric/bdod_mean")
-    soc = ee.Image("projects/soilgrids-isric/soc_mean")
+    clay=ee.Image("projects/soilgrids-isric/clay_mean")
+    sand=ee.Image("projects/soilgrids-isric/sand_mean")
+    silt=ee.Image("projects/soilgrids-isric/silt_mean")
+    bdod=ee.Image("projects/soilgrids-isric/bdod_mean")
+    soc=ee.Image("projects/soilgrids-isric/soc_mean")
 
-    profile = {}
+    profile={}
 
     for d in depths:
 
-        img = clay.select(f"clay_{d}_mean")\
+        img=clay.select(f"clay_{d}_mean")\
         .addBands(sand.select(f"sand_{d}_mean"))\
         .addBands(silt.select(f"silt_{d}_mean"))\
         .addBands(bdod.select(f"bdod_{d}_mean"))\
         .addBands(soc.select(f"soc_{d}_mean"))
 
-        vals = img.reduceRegion(
+        vals=img.reduceRegion(
             reducer=ee.Reducer.mean(),
             geometry=point,
             scale=250,
-            bestEffort=True,
-            maxPixels=1e9
+            bestEffort=True
         ).getInfo()
 
-        profile[d] = {
-            "clay": vals.get(f"clay_{d}_mean",0)/10,
-            "sand": vals.get(f"sand_{d}_mean",0)/10,
-            "silt": vals.get(f"silt_{d}_mean",0)/10,
-            "bdod": vals.get(f"bdod_{d}_mean",0)/100,
-            "soc": vals.get(f"soc_{d}_mean",0)/100
+        profile[d]={
+
+            "clay":vals.get(f"clay_{d}_mean",0)/10,
+            "sand":vals.get(f"sand_{d}_mean",0)/10,
+            "silt":vals.get(f"silt_{d}_mean",0)/10,
+            "bdod":vals.get(f"bdod_{d}_mean",0)/100,
+            "soc":vals.get(f"soc_{d}_mean",0)/100
+
         }
 
     return profile
 
-# ================= MODEL =================
+# ---------------- RAIN ----------------
+
+def get_rain(lat,lon):
+
+    point=ee.Geometry.Point([lon,lat])
+
+    rain=ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")\
+        .filterDate("2015-01-01","2024-01-01")\
+        .sum()
+
+    val=rain.reduceRegion(
+        reducer=ee.Reducer.mean(),
+        geometry=point,
+        scale=5000
+    ).get("precipitation")
+
+    return ee.Number(val).getInfo()/9
+
+# ---------------- SLOPE ----------------
+
+def get_slope(lat,lon):
+
+    point=ee.Geometry.Point([lon,lat])
+
+    dem=ee.Image("USGS/SRTMGL1_003")
+
+    slope=ee.Terrain.slope(dem)
+
+    val=slope.reduceRegion(
+        reducer=ee.Reducer.mean(),
+        geometry=point,
+        scale=30
+    ).get("slope")
+
+    return ee.Number(val).getInfo()
+
+# ---------------- MODEL ----------------
 
 def classify_soil(clay,sand,silt):
 
     if clay>40 and silt>40:
-        return "Lempung Lanauan"
+
+        return "Lempung lanauan"
 
     if clay>40:
+
         return "Lempung"
 
     if clay>30 and sand>40:
-        return "Lempung Berpasir"
+
+        return "Lempung berpasir"
 
     if sand>60:
+
         return "Pasir"
 
     if silt>50:
+
         return "Lanau"
 
     return "Tanah campuran"
 
-def estimate_cbr(clay,sand):
+def detect_peat(soc,bdod):
 
-    if clay>45:
-        return 3
-    if clay>30:
-        return 5
-    if sand>60:
-        return 15
-    return 8
+    return soc>=20 and bdod<=1.2
 
-# ================= ANALYSIS =================
+def estimate_cbr(clay,sand,silt,soc,rain):
+
+    if soc>20:
+
+        cbr=1.5
+
+    elif clay>45:
+
+        cbr=3
+
+    elif clay>35:
+
+        cbr=4.5
+
+    elif clay>25:
+
+        cbr=6
+
+    elif sand>60:
+
+        cbr=15
+
+    else:
+
+        cbr=8
+
+    if rain>2500:
+
+        cbr*=0.8
+
+    return round(cbr,1)
+
+def estimate_hard_layer(profile):
+
+    bd=profile["60-100cm"]["bdod"]
+
+    if bd>=1.45:
+
+        return "±0.8 m"
+
+    if bd>=1.38:
+
+        return "±1.0 m"
+
+    if bd>=1.32:
+
+        return "±1.3 m"
+
+    if bd>=1.28:
+
+        return "±1.6 m"
+
+    return ">2 m"
+
+# ---------------- ANALYSIS ----------------
 
 def analyze_soil(lat,lon,chat_id):
 
-    tg("⏳ Menganalisis lokasi...",chat_id)
+    tg("⏳ Menganalisis tanah...",chat_id)
 
-    profile = get_soil_profile(lat,lon)
+    profile=get_soil_profile(lat,lon)
 
-    location = get_location(lat,lon)
+    location=get_location(lat,lon)
 
-    road = get_road(lat,lon)
+    road=get_road(lat,lon)
 
-    clay = profile["30-60cm"]["clay"]
-    sand = profile["30-60cm"]["sand"]
-    silt = profile["30-60cm"]["silt"]
+    rain=get_rain(lat,lon)
 
-    soil_type = classify_soil(clay,sand,silt)
+    slope=get_slope(lat,lon)
 
-    cbr = estimate_cbr(clay,sand)
+    clay=profile["30-60cm"]["clay"]
+    sand=profile["30-60cm"]["sand"]
+    silt=profile["30-60cm"]["silt"]
+    soc=profile["30-60cm"]["soc"]
+    bdod=profile["30-60cm"]["bdod"]
+
+    soil_type=classify_soil(clay,sand,silt)
+
+    peat=detect_peat(profile["0-5cm"]["soc"],profile["0-5cm"]["bdod"])
+
+    cbr=estimate_cbr(clay,sand,silt,soc,rain)
+
+    hard=estimate_hard_layer(profile)
 
     msg=f"""
 🌍 <b>LAPORAN INTERPRETASI TANAH — AI ANALYSIS</b>
@@ -268,13 +376,24 @@ def analyze_soil(lat,lon,chat_id):
 🚧 Estimasi CBR
 <b>{cbr}%</b>
 
+🌧 Curah hujan
+<b>{rain:.0f} mm/tahun</b>
+
+⛰ Kemiringan lereng
+<b>{slope:.1f}°</b>
+
+🧱 Perkiraan tanah keras
+<b>{hard}</b>
+
+{"🌱 Indikasi gambut" if peat else "🌱 Tidak terindikasi gambut"}
+
 ━━━━━━━━━━━━
-🪨 <b>PROFIL TANAH</b>
+🪨 <b>PROFIL TANAH (0–1 m)</b>
 """
 
     for d,data in profile.items():
 
-        soil = classify_soil(data["clay"],data["sand"],data["silt"])
+        soil=classify_soil(data["clay"],data["sand"],data["silt"])
 
         msg+=f"""
 {d}
@@ -288,7 +407,7 @@ Organic Carbon {data["soc"]:.1f} %
 
     tg(msg,chat_id)
 
-# ================= TELEGRAM LOOP =================
+# ---------------- TELEGRAM LOOP ----------------
 
 def check_messages():
 
@@ -298,9 +417,9 @@ def check_messages():
 
         try:
 
-            url=f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={last_update_id+1}&timeout=30"
-
-            r=requests.get(url,timeout=35).json()
+            r=requests.get(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={last_update_id+1}"
+            ).json()
 
             for update in r.get("result",[]):
 
@@ -310,9 +429,7 @@ def check_messages():
 
                 chat_id=str(msg.get("chat",{}).get("id",""))
 
-                text=msg.get("text","").strip()
-
-                # ===== ADMIN COMMAND =====
+                text=msg.get("text","")
 
                 if text.startswith("/approve") and chat_id==ADMIN_ID:
 
@@ -320,40 +437,27 @@ def check_messages():
 
                     users=load_users()
 
-                    if uid in users["pending"]:
-                        users["pending"].remove(uid)
-
-                    if uid not in users["approved"]:
-                        users["approved"].append(uid)
+                    users["approved"].append(uid)
 
                     save_users(users)
 
-                    tg(f"✅ User {uid} disetujui")
-
-                    tg("🎉 Akses bot telah disetujui.",uid)
+                    tg("✅ Approved",uid)
 
                     continue
-
-                # ===== USER CHECK =====
 
                 status=check_user(chat_id)
 
-                if status=="new":
+                if status!="approved":
 
-                    tg("⛔ Bot memerlukan izin admin.",chat_id)
-                    continue
+                    tg("⛔ Menunggu persetujuan admin",chat_id)
 
-                if status=="pending":
-
-                    tg("⏳ Menunggu persetujuan admin.",chat_id)
                     continue
 
                 if not check_quota(chat_id):
 
-                    tg("⚠ Kuota harian habis.",chat_id)
-                    continue
+                    tg("⚠ Kuota harian habis",chat_id)
 
-                # ===== COORDINATE =====
+                    continue
 
                 coord=re.search(r"(-?\d+\.?\d*)[, ]+(-?\d+\.?\d*)",text)
 
@@ -366,24 +470,23 @@ def check_messages():
 
                 else:
 
-                    tg("📍 Kirim koordinat\n<code>-7.6048,111.9102</code>",chat_id)
+                    tg("📍 Kirim koordinat\n-7.6048,111.9102",chat_id)
 
         except Exception as e:
 
-            log.error(f"Telegram loop error: {e}")
+            log.error(e)
 
         time.sleep(2)
 
-# ================= MAIN =================
+# ---------------- MAIN ----------------
 
 def main():
 
     log.info("Soil AI Bot starting")
 
     tg(
-        "🤖 <b>AI Analisis Tanah siap digunakan</b>\n\n"
-        "Bot menggunakan sistem approval admin.\n"
-        "Kirim pesan untuk meminta akses."
+        "🤖 AI Analisis Tanah aktif\nKirim koordinat untuk analisis",
+        ADMIN_ID
     )
 
     check_messages()
