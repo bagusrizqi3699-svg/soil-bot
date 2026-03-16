@@ -49,7 +49,14 @@ def tg(msg, chat_id=None):
 # SOIL DATA FROM GEE
 # =========================
 
-depths = ["0-5cm","5-15cm","15-30cm","30-60cm","60-100cm","100-200cm"]
+depths = [
+"0-5cm",
+"5-15cm",
+"15-30cm",
+"30-60cm",
+"60-100cm",
+"100-200cm"
+]
 
 datasets = {
 "clay":"projects/soilgrids-isric/clay_mean",
@@ -63,6 +70,7 @@ datasets = {
 def get_soil_all(lat,lon):
 
     point = ee.Geometry.Point([lon,lat])
+
     result = {}
 
     for depth in depths:
@@ -71,15 +79,18 @@ def get_soil_all(lat,lon):
 
         for prop,ds in datasets.items():
 
-            img = ee.Image(ds).select(depth)
+            band = f"{prop}_{depth}_mean"
+
+            img = ee.Image(ds).select(band)
 
             val = img.reduceRegion(
                 reducer=ee.Reducer.mean(),
                 geometry=point,
                 scale=250
-            ).get(depth)
+            ).get(band)
 
             if val:
+
                 result[depth][prop] = ee.Number(val).getInfo()
 
     return result
