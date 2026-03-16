@@ -9,8 +9,6 @@ from datetime import datetime
 
 TELEGRAM_TOKEN="8385287062:AAGgwYA0l7-Cuq4jA7dgcy5GkFAvDp7X1GM"
 ADMIN_ID="1145085024"
-USERS_FILE="users.json"
-DAILY_LIMIT=20
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger(__name__)
@@ -26,68 +24,20 @@ credentials=ee.ServiceAccountCredentials(
 
 ee.Initialize(credentials)
 
+# ================= TELEGRAM =================
+
 def tg(msg,chat_id):
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        json={"chat_id":chat_id,"text":msg,"parse_mode":"HTML"},
-        timeout=30
-    )
 
-def load_users():
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id":chat_id,"text":msg,"parse_mode":"HTML"},
+            timeout=15
+        )
+    except:
+        log.error("Telegram send failed")
 
-    if not os.path.exists(USERS_FILE):
-        return {"approved":[ADMIN_ID],"pending":[],"usage":{}}
-
-    with open(USERS_FILE,"r") as f:
-        return json.load(f)
-
-def save_users(data):
-
-    with open(USERS_FILE,"w") as f:
-        json.dump(data,f)
-
-def check_user(chat_id):
-
-    if chat_id==ADMIN_ID:
-        return "approved"
-
-    users=load_users()
-
-    if chat_id in users["approved"]:
-        return "approved"
-
-    if chat_id in users["pending"]:
-        return "pending"
-
-    users["pending"].append(chat_id)
-    save_users(users)
-
-    tg(f"⚠ User baru meminta akses\nID: {chat_id}\n/approve {chat_id}",ADMIN_ID)
-
-    return "new"
-
-def check_quota(chat_id):
-
-    if chat_id==ADMIN_ID:
-        return True
-
-    users=load_users()
-
-    today=datetime.utcnow().strftime("%Y-%m-%d")
-
-    if chat_id not in users["usage"]:
-        users["usage"][chat_id]={}
-
-    if today not in users["usage"][chat_id]:
-        users["usage"][chat_id][today]=0
-
-    if users["usage"][chat_id][today]>=DAILY_LIMIT:
-        return False
-
-    users["usage"][chat_id][today]+=1
-    save_users(users)
-
-    return True
+# ================= LOCATION =================
 
 def get_location(lat,lon):
 
@@ -96,7 +46,8 @@ def get_location(lat,lon):
         r=requests.get(
             "https://nominatim.openstreetmap.org/reverse",
             params={"lat":lat,"lon":lon,"format":"json"},
-            headers={"User-Agent":"soilbot"}
+            headers={"User-Agent":"soilbot"},
+            timeout=10
         )
 
         addr=r.json()["address"]
@@ -110,6 +61,8 @@ def get_location(lat,lon):
     except:
         return "Tidak terdeteksi"
 
+# ================= ROAD =================
+
 def get_road(lat,lon):
 
     try:
@@ -120,7 +73,11 @@ def get_road(lat,lon):
         out tags 1;
         """
 
-        r=requests.post("https://overpass-api.de/api/interpreter",data=q)
+        r=requests.post(
+            "https://overpass-api.de/api/interpreter",
+            data=q,
+            timeout=10
+        )
 
         data=r.json()
 
@@ -131,6 +88,8 @@ def get_road(lat,lon):
 
     except:
         return None
+
+# ================= SOIL =================
 
 def get_soil_profile(lat,lon):
 
@@ -171,6 +130,8 @@ def get_soil_profile(lat,lon):
 
     return profile
 
+# ================= AGGREGATE LAYER =================
+
 def aggregate_profile(profile):
 
     def avg(keys,field):
@@ -191,6 +152,8 @@ def aggregate_profile(profile):
 
     return agg
 
+# ================= TERRAIN =================
+
 def get_slope(lat,lon):
 
     point=ee.Geometry.Point([lon,lat])
@@ -205,6 +168,8 @@ def get_slope(lat,lon):
     ).get("slope")
 
     return ee.Number(val).getInfo()
+
+# ================= RAIN =================
 
 def get_rain(lat,lon):
 
@@ -222,33 +187,29 @@ def get_rain(lat,lon):
 
     return ee.Number(val).getInfo()/9
 
+# ================= CLASSIFY =================
+
 def classify_soil(clay,sand,silt):
 
     if clay>=sand and clay>=silt:
-        if silt>sand:
-            return "Lempung lanauan"
-        else:
-            return "Lempung berpasir"
+        return "Lempung"
 
     if silt>=clay and silt>=sand:
-        if clay>sand:
-            return "Lanau berlempung"
-        else:
-            return "Lanau berpasir"
+        return "Lanau"
 
-    if sand>=clay and sand>=silt:
-        if clay>silt:
-            return "Pasir berlempung"
-        else:
-            return "Pasir berlanau"
+    return "Pasir"
+
+# ================= PEAT =================
 
 def detect_peat(soc,bdod):
     return soc>=20 and bdod<=1.2
 
+# ================= CBR =================
+
 def estimate_cbr(clay,sand,silt,bdod,soc,rain):
 
     if soc>20 and bdod<1.15:
-        return 1.0
+        return 1
 
     if clay>45:
         cbr=3
@@ -271,37 +232,41 @@ def estimate_cbr(clay,sand,silt,bdod,soc,rain):
 
     return round(cbr,1)
 
+# ================= HARD LAYER =================
+
 def estimate_hard_layer(profile):
 
     bd=profile["60-100cm"]["bdod"]
 
     if bd>=1.45:
         return "±0.8 m"
+
     if bd>=1.38:
         return "±1.0 m"
+
     if bd>=1.32:
         return "±1.3 m"
+
     if bd>=1.28:
         return "±1.6 m"
 
     return ">2 m"
 
+# ================= CONFIDENCE =================
+
 def model_confidence(clay,sand,silt,bdod):
 
     score=70
 
-    if abs(clay-silt)<5 and abs(clay-sand)<5:
-        score-=10
+    if bdod>1.35:
+        score+=5
 
     if bdod<1.1:
         score-=10
 
-    if bdod>1.35:
-        score+=5
+    return max(60,min(score,85))
 
-    score=max(60,min(score,85))
-
-    return score
+# ================= ANALYZE =================
 
 def analyze_soil(lat,lon,chat_id):
 
@@ -368,7 +333,7 @@ def analyze_soil(lat,lon,chat_id):
 {"🌱 Indikasi gambut" if peat else "🌱 Tidak terindikasi gambut"}
 
 ━━━━━━━━━━━━
-🪨 <b>PROFIL TANAH (hingga 1 m)</b>
+🪨 <b>PROFIL TANAH (0–1 m)</b>
 """
 
     for d,data in profile.items():
@@ -376,6 +341,7 @@ def analyze_soil(lat,lon,chat_id):
         soil=classify_soil(data["clay"],data["sand"],data["silt"])
 
         msg+=f"""
+
 {d}
 Jenis tanah : {soil}
 Clay {data["clay"]:.1f} %
@@ -417,6 +383,8 @@ Hasil digunakan sebagai indikasi awal kondisi tanah dan tidak menggantikan inves
 
     tg(msg,chat_id)
 
+# ================= LOOP =================
+
 def check_messages():
 
     global last_update_id
@@ -426,7 +394,8 @@ def check_messages():
         try:
 
             r=requests.get(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={last_update_id+1}"
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={last_update_id+1}",
+                timeout=20
             ).json()
 
             for update in r.get("result",[]):
@@ -452,6 +421,8 @@ def check_messages():
             log.error(e)
 
         time.sleep(2)
+
+# ================= MAIN =================
 
 def main():
 
