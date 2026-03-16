@@ -7,13 +7,43 @@ log = logging.getLogger(__name__)
 last_update_id = 0
 
 DEPTHS = [
-    ("0-5 cm",    "Subgrade Permukaan", "0-5cm",    "0",   75),
-    ("5-15 cm",   "Zona Drainase",      "5-15cm",   "10",  74),
-    ("15-30 cm",  "Subbase Dangkal",    "15-30cm",  "30",  73),
-    ("30-60 cm",  "Subgrade Utama",     "30-60cm",  "60",  72),
-    ("60-100 cm", "Lapisan Dalam",      "60-100cm", "100", 68),
-    ("100-200 cm","Pondasi Dalam",      "100-200cm","200", 65),
+    ("0-5 cm",     "Subgrade Permukaan", "0",   75),
+    ("5-15 cm",    "Zona Drainase",      "10",  74),
+    ("15-30 cm",   "Subbase Dangkal",    "30",  73),
+    ("30-60 cm",   "Subgrade Utama",     "60",  72),
+    ("60-100 cm",  "Lapisan Dalam",      "100", 68),
+    ("100-200 cm", "Pondasi Dalam",      "200", 65),
 ]
+
+BASE = "http://api.openlandmap.org/query/point"
+
+def get_soil(lat, lon, d):
+    result = {}
+    queries = {
+        "clay": f"sol_clay.wfraction_usda.3a1a1a_m_250m_b{d}..{d}cm_1950..2017_v0.2.tif",
+        "sand": f"sol_sand.wfraction_usda.3a1a1a_m_250m_b{d}..{d}cm_1950..2017_v0.2.tif",
+        "bdod": f"sol_bulkdens.fineearth_usda.4a1h_m_250m_b{d}..{d}cm_1950..2017_v0.2.tif",
+        "soc":  f"sol_organic.carbon_usda.6a1c_m_250m_b{d}..{d}cm_1950..2017_v0.2.tif",
+    }
+    for key, regex in queries.items():
+        try:
+            r = requests.get(
+                f"{BASE}?lat={lat}&lon={lon}&coll=predicted250m&regex={regex}",
+                timeout=15
+            ).json()
+            resp = r.get("response", [{}])
+            if resp:
+                val = resp[0].get(regex)
+                if val is not None:
+                    if key == "clay": result["clay"] = float(val) * 100
+                    elif key == "sand": result["sand"] = float(val) * 100
+                    elif key == "bdod": result["bdod"] = float(val) / 100
+                    elif key == "soc":  result["soc"]  = float(val)
+        except Exception as e:
+            log.error(f"{key} d={d}: {e}")
+    if "clay" in result and "sand" in result:
+        result["silt"] = max(0, 100 - result["clay"] - result["sand"])
+    return result
 
 def tg(msg, chat_id=None):
     cid = chat_id or TELEGRAM_CHAT_ID
@@ -22,30 +52,6 @@ def tg(msg, chat_id=None):
         json={"chat_id": cid, "text": msg, "parse_mode": "HTML"},
         timeout=15
     )
-
-def get_soil(lat, lon, d):
-    result = {}
-    base = "https://api.openlandmap.org/query/point"
-    fields = {
-        "clay": f"sol_clay.wfraction_usda.3a1a1a_m_250m_b{d}..{d}cm_1950..2017_v0.2",
-        "sand": f"sol_sand.wfraction_usda.3a1a1a_m_250m_b{d}..{d}cm_1950..2017_v0.2",
-        "bdod": f"sol_bulkdens.fineearth_usda.4a1h_m_250m_b{d}..{d}cm_1950..2017_v0.2",
-        "soc":  f"sol_organic.carbon_usda.6a1c_m_250m_b{d}..{d}cm_1950..2017_v0.2",
-    }
-    for key, coll in fields.items():
-        try:
-            r = requests.get(f"{base}?lon={lon}&lat={lat}&coll={coll}", timeout=15).json()
-            val = r.get(coll)
-            if val is not None:
-                if key == "clay": result["clay"] = float(val) * 100
-                elif key == "sand": result["sand"] = float(val) * 100
-                elif key == "bdod": result["bdod"] = float(val) / 100
-                elif key == "soc": result["soc"] = float(val)
-        except Exception as e:
-            log.error(f"{key} error: {e}")
-    if "clay" in result and "sand" in result:
-        result["silt"] = max(0, 100 - result["clay"] - result["sand"])
-    return result
 
 def classify_soil(clay, sand, silt):
     if clay >= 40 and silt >= 40: return "Silty Clay"
@@ -69,15 +75,9 @@ def soil_category(clay, bdod, soc):
     elif clay > 10: return ("AGAK PADAT", "🟢")
     else: return ("PADAT", "✅")
 
-def is_expansive(clay, cec=None):
-    score = 0
-    if clay > 60: score += 2
-    elif clay > 40: score += 1
-    if cec:
-        if cec > 15: score += 2
-        elif cec > 10: score += 1
-    if score >= 3: return ("TINGGI", "🔴", 80)
-    elif score >= 2: return ("SEDANG", "🟡", 60)
+def is_expansive(clay):
+    if clay > 60: return ("TINGGI", "🔴", 80)
+    elif clay > 40: return ("SEDANG", "🟡", 55)
     else: return ("RENDAH", "✅", 20)
 
 def is_peat(soc, bdod):
@@ -98,39 +98,38 @@ def calc_risks(clay, sand, silt, bdod, soc):
         risks += [
             ("Settlement Ekstrem", 95, "🔴", "Gambut sangat kompresibel → jalan amblas masif"),
             ("Bearing Capacity Gagal", 92, "🔴", "Daya dukung hampir nol → perlu cerucuk/replacement"),
-            ("Rutting Parah", 90, "🔴", "Beban lalu lintas langsung melesak ke gambut"),
+            ("Rutting Parah", 90, "🔴", "Beban lalu lintas melesak langsung ke gambut"),
             ("Kebakaran Bawah Tanah", 60, "🟡", "Gambut kering rentan terbakar → rongga bawah jalan"),
         ]
     else:
         if clay > 35:
             exp_lvl, _, exp_pct = is_expansive(clay)
             risks += [
-                ("Retak Reflektif", min(95, 40 + int(clay)), "🔴" if clay > 50 else "🟠",
-                 f"Clay {clay:.0f}% → aspal retak mengikuti pola kembang-susut tanah"),
-                ("Rutting/Ambles", min(90, 35 + int(clay)), "🔴" if clay > 50 else "🟠",
-                 f"Subgrade lunak, CBR rendah → jalan mudah amblas saat hujan/beban berat"),
-                ("Heave (Terangkat)", exp_pct, "🔴" if exp_pct > 60 else "🟡",
-                 f"Tanah ekspansif {exp_lvl} → perkerasan terangkat saat musim hujan"),
-                ("Banjir/Genangan", min(85, 30 + int(clay)), "🔴" if clay > 45 else "🟠",
-                 f"Clay tinggi, permeabilitas rendah → air sulit meresap"),
+                ("Retak Reflektif", min(95, 40+int(clay)), "🔴" if clay>50 else "🟠",
+                 f"Clay {clay:.0f}% → aspal retak ikuti pola kembang-susut tanah"),
+                ("Rutting/Ambles", min(90, 35+int(clay)), "🔴" if clay>50 else "🟠",
+                 f"Subgrade lunak, CBR rendah → jalan amblas saat hujan/beban berat"),
+                ("Heave (Terangkat)", exp_pct, "🔴" if exp_pct>60 else "🟡",
+                 f"Ekspansif {exp_lvl} → perkerasan terangkat saat musim hujan"),
+                ("Banjir/Genangan", min(85, 30+int(clay)), "🔴" if clay>45 else "🟠",
+                 "Clay tinggi, permeabilitas rendah → air sulit meresap"),
             ]
         if silt and silt > 30:
             risks += [
-                ("Erosi Tepi Jalan", min(85, 20 + int(silt)), "🔴" if silt > 50 else "🟡",
+                ("Erosi Tepi Jalan", min(85, 20+int(silt)), "🔴" if silt>50 else "🟡",
                  f"Silt {silt:.0f}% → bahu jalan mudah terkikis aliran air"),
-                ("Pumping", min(75, 15 + int(silt)), "🟡",
-                 "Silt tinggi → material keluar dari retakan saat beban dinamis"),
+                ("Pumping", min(75, 15+int(silt)), "🟡",
+                 "Material keluar dari retakan perkerasan saat beban dinamis"),
             ]
         if sand and sand > 60:
             risks += [
                 ("Erosi Tinggi", min(80, int(sand)), "🟠",
-                 f"Sand {sand:.0f}% → material mudah terbawa air, tepi jalan rawan longsor"),
+                 f"Sand {sand:.0f}% → material terbawa air, tepi jalan rawan longsor"),
                 ("Likuifaksi", 45, "🟡",
-                 "Pasir lepas → risiko likuifaksi saat gempa atau getaran berat"),
+                 "Pasir lepas → risiko likuifaksi saat gempa/getaran berat"),
             ]
         if not risks:
-            risks.append(("Risiko Umum", 30, "🟢",
-                "Kondisi tanah relatif baik, pantau drainase"))
+            risks.append(("Risiko Umum", 25, "🟢", "Kondisi tanah relatif baik"))
     risks.sort(key=lambda x: x[1], reverse=True)
     return risks
 
@@ -180,35 +179,35 @@ def recommend(clay, sand, silt, bdod, soc):
         ]
 
 def bar(pct, length=10):
-    filled = int(round(min(pct, 100) / 100 * length))
-    return "█" * filled + "░" * (length - filled)
+    filled = int(round(min(pct,100)/100*length))
+    return "█"*filled + "░"*(length-filled)
 
 def analyze_soil(lat, lon, chat_id):
-    tg(f"⏳ Menganalisis tanah...\n📍 {lat}, {lon}\nMohon tunggu ~30 detik.", chat_id)
+    tg(f"⏳ Menganalisis tanah...\n📍 {lat}, {lon}\nMohon tunggu ~45 detik.", chat_id)
     all_data = {}
-    for label, role, depth_code, d_val, acc in DEPTHS:
+    for label, role, d_val, acc in DEPTHS:
         try:
             d = get_soil(lat, lon, d_val)
             if d and "clay" in d:
-                all_data[depth_code] = (label, role, acc, d)
+                all_data[d_val] = (label, role, acc, d)
         except Exception as e:
-            log.error(f"Error {depth_code}: {e}")
+            log.error(f"Error d={d_val}: {e}")
 
     if not all_data:
-        tg("❌ Gagal ambil data. API sedang down, coba lagi beberapa menit.", chat_id)
+        tg("❌ Gagal ambil data. API sedang tidak merespons.\nCoba lagi beberapa menit.", chat_id)
         return
 
     msg = (f"📍 <b>LAPORAN TANAH — ROAD ENGINEERING</b>\n"
            f"🌐 Koordinat: {lat}, {lon}\n"
            f"🔬 Sumber: OpenLandMap (ISRIC)\n\n")
 
-    for depth_code, (label, role, acc, d) in all_data.items():
+    for d_val, (label, role, acc, d) in all_data.items():
         clay = d.get("clay", 0)
-        sand = d.get("sand")
-        silt = d.get("silt")
+        sand = d.get("sand", 0)
+        silt = d.get("silt", 0)
         bdod = d.get("bdod")
         soc  = d.get("soc")
-        soil_type = classify_soil(clay, sand or 0, silt or 0)
+        soil_type = classify_soil(clay, sand, silt)
         cat, cat_emoji = soil_category(clay, bdod, soc)
         exp, exp_emoji, _ = is_expansive(clay)
         peat_flag = "YA 🔴" if is_peat(soc, bdod) else "Tidak ✅"
@@ -216,11 +215,13 @@ def analyze_soil(lat, lon, chat_id):
         msg += f"━━━━━━━━━━━━━━━\n"
         msg += f"🔍 <b>{label} — {role}</b> (~{acc}%)\n"
         msg += f"Jenis: {soil_type} | {cat} {cat_emoji}\n"
-        msg += f"Clay: {clay:.0f}% {bar(clay)} | Sand: {sand:.0f}% {bar(sand or 0)} | Silt: {silt:.0f}% {bar(silt or 0)}\n"
+        msg += f"Clay: {clay:.0f}% {bar(clay)}\n"
+        msg += f"Sand: {sand:.0f}% {bar(sand)}\n"
+        msg += f"Silt: {silt:.0f}% {bar(silt)}\n"
         if bdod: msg += f"Bulk Density: {bdod:.2f} g/cm³\n"
         msg += f"Ekspansif: {exp} {exp_emoji} | Peat: {peat_flag}\n\n"
 
-    main = all_data.get("30-60cm", list(all_data.values())[0])
+    main = all_data.get("60", list(all_data.values())[0])
     _, _, _, md = main
     clay = md.get("clay", 0)
     sand = md.get("sand", 0)
@@ -254,27 +255,26 @@ def check_messages():
     while True:
         try:
             url = (f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-                   f"?offset={last_update_id + 1}&timeout=30")
+                   f"?offset={last_update_id+1}&timeout=30")
             r = requests.get(url, timeout=35).json()
             for update in r.get("result", []):
                 last_update_id = update["update_id"]
                 msg = update.get("message", {})
                 chat_id = str(msg.get("chat", {}).get("id", ""))
                 text = msg.get("text", "").strip()
-                if not text:
-                    continue
-                coord_match = re.search(r"(-?\d+\.?\d*)[,\s]+(-?\d+\.?\d*)", text)
-                if text.lower() in ["/start", "halo", "hi", "help", "/help"]:
+                if not text: continue
+                coord = re.search(r"(-?\d+\.?\d*)[,\s]+(-?\d+\.?\d*)", text)
+                if text.lower() in ["/start", "help", "/help"]:
                     tg("🌍 <b>Soil Analyzer — Road Engineering</b>\n\n"
                        "Kirim koordinat:\n<code>-7.6048, 111.9102</code>\n\n"
                        "📊 Output:\n• Jenis tanah (6 kedalaman)\n"
-                       "• Clay/Sand/Silt%\n• Deteksi Peat & Ekspansif\n"
+                       "• Clay/Sand/Silt%\n• Peat & Ekspansif\n"
                        "• Estimasi CBR\n• Risiko jalan + %\n"
                        "• Rekomendasi road engineering\n\n"
                        "⚠️ Akurasi ~65-75%", chat_id)
-                elif coord_match:
-                    lat = float(coord_match.group(1))
-                    lon = float(coord_match.group(2))
+                elif coord:
+                    lat = float(coord.group(1))
+                    lon = float(coord.group(2))
                     if -90 <= lat <= 90 and -180 <= lon <= 180:
                         analyze_soil(lat, lon, chat_id)
                     else:
