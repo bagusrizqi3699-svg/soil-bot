@@ -61,17 +61,14 @@ def save_users(data):
 def check_user(chat_id):
 
     if chat_id==ADMIN_ID:
-
         return "approved"
 
     users=load_users()
 
     if chat_id in users["approved"]:
-
         return "approved"
 
     if chat_id in users["pending"]:
-
         return "pending"
 
     users["pending"].append(chat_id)
@@ -87,7 +84,6 @@ def check_user(chat_id):
 def check_quota(chat_id):
 
     if chat_id==ADMIN_ID:
-
         return True
 
     users=load_users()
@@ -95,19 +91,15 @@ def check_quota(chat_id):
     today=datetime.utcnow().strftime("%Y-%m-%d")
 
     if chat_id not in users["usage"]:
-
         users["usage"][chat_id]={}
 
     if today not in users["usage"][chat_id]:
-
         users["usage"][chat_id][today]=0
 
     if users["usage"][chat_id][today]>=DAILY_LIMIT:
-
         return False
 
     users["usage"][chat_id][today]+=1
-
     save_users(users)
 
     return True
@@ -133,7 +125,6 @@ def get_location(lat,lon):
         return f"{city}, {state}, {country}"
 
     except:
-
         return "Tidak terdeteksi"
 
 # ================= ROAD =================
@@ -153,13 +144,11 @@ def get_road(lat,lon):
         data=r.json()
 
         if not data["elements"]:
-
             return None
 
         return data["elements"][0]["tags"].get("name")
 
     except:
-
         return None
 
 # ================= SOIL PROFILE =================
@@ -194,13 +183,11 @@ def get_soil_profile(lat,lon):
         ).getInfo()
 
         profile[d]={
-
             "clay":vals.get(f"clay_{d}_mean",0)/10,
             "sand":vals.get(f"sand_{d}_mean",0)/10,
             "silt":vals.get(f"silt_{d}_mean",0)/10,
             "bdod":vals.get(f"bdod_{d}_mean",0)/100,
             "soc":vals.get(f"soc_{d}_mean",0)/100
-
         }
 
     return profile
@@ -241,28 +228,23 @@ def get_rain(lat,lon):
 
     return ee.Number(val).getInfo()/9
 
-# ================= MODEL =================
+# ================= INTERPRETATION =================
 
 def classify_soil(clay,sand,silt):
 
     if clay>40 and silt>40:
-
         return "Lempung lanauan"
 
     if clay>40:
-
         return "Lempung"
 
     if clay>30 and sand>40:
-
         return "Lempung berpasir"
 
     if sand>60:
-
         return "Pasir"
 
     if silt>50:
-
         return "Lanau"
 
     return "Tanah campuran"
@@ -274,31 +256,19 @@ def detect_peat(soc,bdod):
 def estimate_cbr(clay,sand,silt,soc,rain):
 
     if soc>20:
-
         cbr=1.5
-
     elif clay>45:
-
         cbr=3
-
     elif clay>35:
-
         cbr=4.5
-
     elif clay>25:
-
         cbr=6
-
     elif sand>60:
-
         cbr=15
-
     else:
-
         cbr=8
 
     if rain>2500:
-
         cbr*=0.8
 
     return round(cbr,1)
@@ -308,19 +278,12 @@ def estimate_hard_layer(profile):
     bd=profile["60-100cm"]["bdod"]
 
     if bd>=1.45:
-
         return "±0.8 m"
-
     if bd>=1.38:
-
         return "±1.0 m"
-
     if bd>=1.32:
-
         return "±1.3 m"
-
     if bd>=1.28:
-
         return "±1.6 m"
 
     return ">2 m"
@@ -334,11 +297,9 @@ def analyze_soil(lat,lon,chat_id):
     profile=get_soil_profile(lat,lon)
 
     location=get_location(lat,lon)
-
     road=get_road(lat,lon)
 
     rain=get_rain(lat,lon)
-
     slope=get_slope(lat,lon)
 
     clay=profile["30-60cm"]["clay"]
@@ -367,6 +328,7 @@ def analyze_soil(lat,lon,chat_id):
 {road if road else "Tidak terdeteksi"}
 
 ━━━━━━━━━━━━
+🔎 <b>RINGKASAN CEPAT</b>
 
 🪨 Jenis tanah dominan
 <b>{soil_type}</b>
@@ -403,6 +365,35 @@ Bulk Density {data["bdod"]:.2f} g/cm³
 Organic Carbon {data["soc"]:.1f} %
 """
 
+    msg+=f"""
+
+━━━━━━━━━━━━
+⚠ <b>DAMPAK TERHADAP PERKERASAN</b>
+
+1. Retak reflektif akibat kembang susut tanah
+2. Rutting / ambles akibat daya dukung rendah
+3. Genangan air saat hujan tinggi
+"""
+
+    msg+=f"""
+
+🛠 <b>REKOMENDASI PENANGANAN</b>
+
+• Stabilisasi kapur 5–8% atau semen
+• Geotextile pada subgrade
+• Drainase baik
+"""
+
+    msg+=f"""
+
+🔬 <b>PENGUJIAN TANAH</b>
+
+• Field CBR
+• Atterberg limits
+• DCP test
+• Sondir / CPT
+"""
+
     tg(msg,chat_id)
 
 # ================= TELEGRAM LOOP =================
@@ -426,7 +417,6 @@ def check_messages():
                 msg=update.get("message",{})
 
                 chat_id=str(msg.get("chat",{}).get("id",""))
-
                 text=msg.get("text","")
 
                 if text.startswith("/approve") and chat_id==ADMIN_ID:
@@ -482,7 +472,7 @@ def main():
 
     log.info("Soil AI Bot starting")
 
-    tg("🤖 AI Soil Analyzer aktif",ADMIN_ID)
+    tg("🤖 AI Soil Analyzer siap digunakan",ADMIN_ID)
 
     check_messages()
 
