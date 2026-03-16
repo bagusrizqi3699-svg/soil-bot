@@ -22,6 +22,8 @@ credentials=ee.ServiceAccountCredentials(
 
 ee.Initialize(credentials)
 
+# ================= TELEGRAM =================
+
 def tg(msg,chat_id=None):
 
     cid=chat_id or TELEGRAM_CHAT_ID
@@ -32,9 +34,7 @@ def tg(msg,chat_id=None):
         timeout=30
     )
 
-# =========================
-# LOCATION
-# =========================
+# ================= LOCATION =================
 
 def get_location(lat,lon):
 
@@ -59,9 +59,7 @@ def get_location(lat,lon):
     except:
         return "Lokasi tidak diketahui"
 
-# =========================
-# ROAD NAME
-# =========================
+# ================= ROAD =================
 
 def get_road(lat,lon):
 
@@ -71,7 +69,7 @@ def get_road(lat,lon):
 
         q=f"""
         [out:json];
-        way(around:30,{lat},{lon})["highway"];
+        way(around:100,{lat},{lon})["highway"];
         out tags 1;
         """
 
@@ -86,9 +84,7 @@ def get_road(lat,lon):
     except:
         return None
 
-# =========================
-# SOIL PROFILE
-# =========================
+# ================= SOIL PROFILE =================
 
 def get_soil_profile(lat,lon):
 
@@ -125,34 +121,30 @@ def get_soil_profile(lat,lon):
             "sand":vals.get(f"sand_{d}_mean",0)/10,
             "silt":vals.get(f"silt_{d}_mean",0)/10,
             "bdod":vals.get(f"bdod_{d}_mean",0)/100,
-            "soc":vals.get(f"soc_{d}_mean",0)/10
+            "soc":vals.get(f"soc_{d}_mean",0)/100
         }
 
     return profile
 
-# =========================
-# CLASSIFY SOIL
-# =========================
+# ================= TERRAIN =================
 
-def classify_soil(clay,sand,silt):
+def get_slope(lat,lon):
 
-    if clay>40:
-        return "Lempung"
+    point=ee.Geometry.Point([lon,lat])
 
-    if clay>30 and sand>40:
-        return "Lempung Berpasir"
+    dem=ee.Image("USGS/SRTMGL1_003")
 
-    if sand>60:
-        return "Pasir"
+    slope=ee.Terrain.slope(dem)
 
-    if silt>50:
-        return "Lanau"
+    val=slope.reduceRegion(
+        reducer=ee.Reducer.mean(),
+        geometry=point,
+        scale=30
+    ).get("slope")
 
-    return "Tanah campuran"
+    return ee.Number(val).getInfo()
 
-# =========================
-# RAIN
-# =========================
+# ================= RAIN =================
 
 def get_rain(lat,lon):
 
@@ -183,20 +175,43 @@ def rain_class(mm):
 
     return "sangat tinggi"
 
-# =========================
-# PEAT DETECTION
-# =========================
+# ================= SOIL CLASS =================
+
+def classify_soil(clay,sand,silt):
+
+    if clay>40 and silt>40:
+        return "Lempung Lanauan"
+
+    if clay>40:
+        return "Lempung"
+
+    if clay>30 and sand>40:
+        return "Lempung Berpasir"
+
+    if silt>50:
+        return "Lanau"
+
+    if sand>60:
+        return "Pasir"
+
+    return "Tanah campuran"
+
+# ================= PEAT =================
 
 def detect_peat(soc,bdod):
 
-    if soc>=20 and bdod<=1.0:
+    if soc>=20 and bdod<=1.2:
         return True
 
     return False
 
-# =========================
-# VERY SOFT SOIL
-# =========================
+# ================= EXPANSIVE =================
+
+def expansive(clay):
+
+    return clay>45
+
+# ================= SOFT SOIL =================
 
 def detect_soft(clay,bdod,soc):
 
@@ -213,72 +228,110 @@ def detect_soft(clay,bdod,soc):
 
     return score>=2
 
-# =========================
-# CBR
-# =========================
+# ================= CBR MODEL =================
 
-def estimate_cbr(clay,sand):
+def estimate_cbr(clay,sand,silt,soc,rain):
 
-    if clay>45:
-        return 3
+    if soc>20:
+        cbr=2
 
-    if clay>30:
-        return 5
+    elif clay>45:
+        cbr=3
 
-    if sand>60:
-        return 15
+    elif clay>30:
+        cbr=5
 
-    return 8
+    elif silt>50:
+        cbr=6
 
-# =========================
-# IMPACTS
-# =========================
+    elif sand>60:
+        cbr=15
 
-def impacts(clay,sand,rain):
+    else:
+        cbr=8
+
+    if rain>2500:
+        cbr*=0.8
+
+    return round(cbr,1)
+
+# ================= HARD LAYER =================
+
+def estimate_hard_layer(profile):
+
+    for d,data in profile.items():
+
+        if data["bdod"]>1.5:
+            return f"sekitar {d}"
+
+    return "> 1 m"
+
+# ================= IMPACT =================
+
+def impacts(clay,sand,rain,peat,exp):
 
     out=[]
 
+    if peat:
+        out.append("Penurunan tanah besar akibat tanah organik")
+
     if clay>35:
-        out.append("Retak reflektif akibat kembang susut tanah lempung")
+        out.append("Retak reflektif akibat kembang susut lempung")
 
     if clay>30:
-        out.append("Rutting atau ambles akibat daya dukung tanah rendah")
+        out.append("Rutting atau ambles akibat daya dukung rendah")
+
+    if exp:
+        out.append("Potensi heave akibat lempung ekspansif")
 
     if rain>2000:
-        out.append("Genangan air berpotensi terjadi saat hujan tinggi")
+        out.append("Genangan air saat musim hujan")
 
     if sand>60:
-        out.append("Erosi bahu jalan akibat dominasi pasir")
+        out.append("Erosi bahu jalan akibat material pasir")
 
     return out
 
-# =========================
-# RECOMMENDATIONS
-# =========================
+# ================= RECOMMEND =================
 
 def recommendations(clay,sand,cbr,peat):
 
     if peat:
+
         return [
         "Perbaikan tanah gambut (soil replacement)",
         "Preloading + vertical drain",
-        "Geotextile / geogrid reinforcement"
+        "Geotextile atau geogrid reinforcement"
         ]
 
     if cbr<3:
-        return ["Perbaikan tanah","Geogrid reinforcement"]
+
+        return [
+        "Perkuatan tanah dasar",
+        "Geogrid reinforcement"
+        ]
 
     if clay>40:
-        return ["Stabilisasi kapur 5–8%","Pemasangan geotextile"]
+
+        return [
+        "Stabilisasi kapur 5–8%",
+        "Geotextile pada subgrade",
+        "Drainase baik"
+        ]
 
     if sand>60:
-        return ["Pemadatan tinggi","Stabilisasi semen"]
 
-    return ["Perkerasan standar","Drainase tepi jalan"]
+        return [
+        "Pemadatan tinggi",
+        "Stabilisasi semen"
+        ]
 
-# =========================
-# TESTS
-# =========================
+    return [
+    "Perkerasan standar",
+    "Drainase tepi jalan"
+    ]
+
+# ================= TESTS =================
 
 def tests(clay,sand):
 
@@ -291,12 +344,11 @@ def tests(clay,sand):
         t.append("Sand cone test")
 
     t.append("DCP test")
+    t.append("Sondir / CPT")
 
     return t
 
-# =========================
-# ANALYSIS
-# =========================
+# ================= ANALYSIS =================
 
 def analyze_soil(lat,lon,chat_id):
 
@@ -310,20 +362,27 @@ def analyze_soil(lat,lon,chat_id):
 
     rain=get_rain(lat,lon)
 
+    slope=get_slope(lat,lon)
+
     clay=profile["30-60cm"]["clay"]
     sand=profile["30-60cm"]["sand"]
     silt=profile["30-60cm"]["silt"]
     bdod=profile["30-60cm"]["bdod"]
+    soc=profile["30-60cm"]["soc"]
 
     soil_type=classify_soil(clay,sand,silt)
 
-    cbr=estimate_cbr(clay,sand)
-
     peat=detect_peat(profile["0-5cm"]["soc"],profile["0-5cm"]["bdod"])
 
-    soft=detect_soft(clay,bdod,profile["30-60cm"]["soc"])
+    exp=expansive(clay)
 
-    imp=impacts(clay,sand,rain)
+    soft=detect_soft(clay,bdod,soc)
+
+    cbr=estimate_cbr(clay,sand,silt,soc,rain)
+
+    hard=estimate_hard_layer(profile)
+
+    imp=impacts(clay,sand,rain,peat,exp)
 
     rec=recommendations(clay,sand,cbr,peat)
 
@@ -332,6 +391,8 @@ def analyze_soil(lat,lon,chat_id):
     peat_txt="🌱 Terindikasi gambut" if peat else "🌱 Tidak terindikasi gambut"
 
     soft_txt="🚨 Subgrade sangat lunak" if soft else "🟢 Subgrade relatif normal"
+
+    exp_txt="⚠ Lempung ekspansif" if exp else "🟢 Tidak ekspansif"
 
     msg=f"""
 🌍 <b>LAPORAN INTERPRETASI TANAH — AI ANALYSIS</b>
@@ -356,10 +417,17 @@ def analyze_soil(lat,lon,chat_id):
 <b>{cbr}%</b>
 
 🌧 Curah hujan
-<b>{rain:.0f} mm/tahun</b>
+<b>{rain:.0f} mm/tahun ({rain_class(rain)})</b>
+
+⛰ Kemiringan lereng
+<b>{slope:.1f}°</b>
+
+🧱 Perkiraan tanah relatif keras
+<b>{hard}</b>
 
 {peat_txt}
 {soft_txt}
+{exp_txt}
 
 ━━━━━━━━━━━━
 
@@ -397,9 +465,7 @@ Organic Carbon {data["soc"]:.1f} %
 
     tg(msg,chat_id)
 
-# =========================
-# TELEGRAM LOOP
-# =========================
+# ================= TELEGRAM LOOP =================
 
 def check_messages():
 
