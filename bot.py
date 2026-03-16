@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 last_update_id = 0
 
 service_account = json.loads(os.environ["GEE_KEY"])
+
 credentials = ee.ServiceAccountCredentials(
     service_account["client_email"],
     key_data=json.dumps(service_account)
@@ -22,16 +23,18 @@ credentials = ee.ServiceAccountCredentials(
 ee.Initialize(credentials)
 
 def tg(msg, chat_id=None):
+
     cid = chat_id or TELEGRAM_CHAT_ID
+
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
         json={"chat_id": cid, "text": msg, "parse_mode": "HTML"},
-        timeout=20
+        timeout=25
     )
 
-# =====================
+# =========================
 # LOCATION
-# =====================
+# =========================
 
 def get_location(lat,lon):
 
@@ -56,9 +59,9 @@ def get_location(lat,lon):
     except:
         return "Lokasi tidak diketahui"
 
-# =====================
+# =========================
 # ROAD NAME
-# =====================
+# =========================
 
 def get_road(lat,lon):
 
@@ -72,7 +75,8 @@ def get_road(lat,lon):
         out tags 1;
         """
 
-        r=requests.post(url,data=q)
+        r=requests.post(url,data=q,timeout=20)
+
         data=r.json()
 
         if not data["elements"]:
@@ -83,57 +87,50 @@ def get_road(lat,lon):
     except:
         return None
 
-# =====================
-# SOIL DATA
-# =====================
+# =========================
+# SOIL PROFILE
+# =========================
 
-def get_soil(lat,lon):
-
-    point=ee.Geometry.Point([lon,lat])
-
-    img=ee.Image("projects/soilgrids-isric/clay_mean")\
-    .addBands(ee.Image("projects/soilgrids-isric/sand_mean"))\
-    .addBands(ee.Image("projects/soilgrids-isric/silt_mean"))\
-    .addBands(ee.Image("projects/soilgrids-isric/bdod_mean"))
-
-    vals=img.reduceRegion(
-        reducer=ee.Reducer.mean(),
-        geometry=point,
-        scale=250,
-        bestEffort=True,
-        maxPixels=1e9
-    ).getInfo()
-
-    clay=vals.get("clay_30-60cm_mean",0)/10
-    sand=vals.get("sand_30-60cm_mean",0)/10
-    silt=vals.get("silt_30-60cm_mean",0)/10
-    bdod=vals.get("bdod_30-60cm_mean",0)/100
-
-    return clay,sand,silt,bdod
-
-# =====================
-# RAIN
-# =====================
-
-def get_rain(lat,lon):
+def get_soil_profile(lat,lon):
 
     point=ee.Geometry.Point([lon,lat])
 
-    rain=ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")\
-    .filterDate("2015-01-01","2024-01-01")\
-    .sum()
+    depths=["0-5cm","5-15cm","15-30cm","30-60cm","60-100cm"]
 
-    val=rain.reduceRegion(
-        reducer=ee.Reducer.mean(),
-        geometry=point,
-        scale=5000
-    ).get("precipitation")
+    clay=ee.Image("projects/soilgrids-isric/clay_mean")
+    sand=ee.Image("projects/soilgrids-isric/sand_mean")
+    silt=ee.Image("projects/soilgrids-isric/silt_mean")
+    bdod=ee.Image("projects/soilgrids-isric/bdod_mean")
 
-    return ee.Number(val).getInfo()/9
+    profile={}
 
-# =====================
-# CLASSIFY SOIL
-# =====================
+    for d in depths:
+
+        img=clay.select(f"clay_{d}_mean")\
+        .addBands(sand.select(f"sand_{d}_mean"))\
+        .addBands(silt.select(f"silt_{d}_mean"))\
+        .addBands(bdod.select(f"bdod_{d}_mean"))
+
+        vals=img.reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=point,
+            scale=250,
+            bestEffort=True,
+            maxPixels=1e9
+        ).getInfo()
+
+        profile[d]={
+            "clay":vals.get(f"clay_{d}_mean",0)/10,
+            "sand":vals.get(f"sand_{d}_mean",0)/10,
+            "silt":vals.get(f"silt_{d}_mean",0)/10,
+            "bdod":vals.get(f"bdod_{d}_mean",0)/100
+        }
+
+    return profile
+
+# =========================
+# SOIL CLASSIFICATION
+# =========================
 
 def classify_soil(clay,sand,silt):
 
@@ -151,9 +148,29 @@ def classify_soil(clay,sand,silt):
 
     return "Tanah campuran"
 
-# =====================
+# =========================
+# RAINFALL
+# =========================
+
+def get_rain(lat,lon):
+
+    point=ee.Geometry.Point([lon,lat])
+
+    rain=ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")\
+    .filterDate("2015-01-01","2024-01-01")\
+    .sum()
+
+    val=rain.reduceRegion(
+        reducer=ee.Reducer.mean(),
+        geometry=point,
+        scale=5000
+    ).get("precipitation")
+
+    return ee.Number(val).getInfo()/9
+
+# =========================
 # CBR
-# =====================
+# =========================
 
 def estimate_cbr(clay,sand):
 
@@ -168,53 +185,57 @@ def estimate_cbr(clay,sand):
 
     return 8
 
-# =====================
-# IMPACTS
-# =====================
+# =========================
+# IMPACT
+# =========================
 
 def impacts(clay,sand,rain):
 
     out=[]
 
     if clay>35:
-        out.append("Retak reflektif akibat kembang susut tanah")
+        out.append("Retak reflektif akibat kembang susut tanah lempung")
 
     if clay>30:
-        out.append("Rutting atau ambles akibat daya dukung rendah")
+        out.append("Rutting atau ambles akibat daya dukung tanah rendah")
 
     if rain>2000:
-        out.append("Genangan air saat hujan tinggi")
+        out.append("Genangan air berpotensi terjadi saat hujan tinggi")
 
     if sand>60:
         out.append("Erosi bahu jalan akibat dominasi pasir")
 
     return out
 
-# =====================
-# RECOMMENDATIONS
-# =====================
+# =========================
+# RECOMMENDATION
+# =========================
 
 def recommendations(clay,sand,cbr):
 
     rec=[]
 
     if cbr<3:
-        rec+=["Perbaikan tanah","Geogrid reinforcement"]
+        rec+=["Perbaikan tanah (soil replacement)",
+              "Geogrid reinforcement"]
 
     elif clay>40:
-        rec+=["Stabilisasi kapur 5-8%","Geotextile"]
+        rec+=["Stabilisasi kapur 5–8%",
+              "Pemasangan geotextile"]
 
     elif sand>60:
-        rec+=["Pemadatan tinggi","Stabilisasi semen"]
+        rec+=["Pemadatan tinggi",
+              "Stabilisasi semen"]
 
     else:
-        rec+=["Perkerasan standar"]
+        rec+=["Perkerasan standar",
+              "Drainase tepi jalan"]
 
     return rec
 
-# =====================
+# =========================
 # TESTS
-# =====================
+# =========================
 
 def tests(clay,sand):
 
@@ -230,25 +251,29 @@ def tests(clay,sand):
 
     return t
 
-# =====================
-# ANALYZE
-# =====================
+# =========================
+# ANALYSIS
+# =========================
 
 def analyze_soil(lat,lon,chat_id):
 
     tg("⏳ Menganalisis lokasi...",chat_id)
 
-    clay,sand,silt,bdod=get_soil(lat,lon)
-
-    soil_type=classify_soil(clay,sand,silt)
-
-    cbr=estimate_cbr(clay,sand)
-
-    rain=get_rain(lat,lon)
+    profile=get_soil_profile(lat,lon)
 
     location=get_location(lat,lon)
 
     road=get_road(lat,lon)
+
+    rain=get_rain(lat,lon)
+
+    clay=profile["30-60cm"]["clay"]
+    sand=profile["30-60cm"]["sand"]
+    silt=profile["30-60cm"]["silt"]
+
+    soil_type=classify_soil(clay,sand,silt)
+
+    cbr=estimate_cbr(clay,sand)
 
     imp=impacts(clay,sand,rain)
 
@@ -272,38 +297,58 @@ def analyze_soil(lat,lon,chat_id):
 
 🔎 <b>RINGKASAN CEPAT</b>
 
-Jenis tanah dominan
+🪨 Jenis tanah dominan
 <b>{soil_type}</b>
 
-Estimasi CBR
+🚧 Estimasi CBR
 <b>{cbr}%</b>
 
-Curah hujan
+🌧 Curah hujan
 <b>{rain:.0f} mm/tahun</b>
 
 ━━━━━━━━━━━━
 
-⚠ <b>DAMPAK TERHADAP PERKERASAN</b>
+🪨 <b>PROFIL TANAH (hingga 1 m)</b>
 """
 
+    for d,data in profile.items():
+
+        soil=classify_soil(data["clay"],data["sand"],data["silt"])
+
+        msg+=f"""
+{d}
+Jenis tanah : {soil}
+Clay {data["clay"]:.1f} %
+Sand {data["sand"]:.1f} %
+Silt {data["silt"]:.1f} %
+Bulk Density {data["bdod"]:.2f} g/cm³
+"""
+
+    msg+="\n━━━━━━━━━━━━\n"
+
+    msg+="⚠ <b>DAMPAK TERHADAP PERKERASAN</b>\n"
+
     for i,x in enumerate(imp,1):
+
         msg+=f"{i}. {x}\n"
 
     msg+="\n🛠 <b>REKOMENDASI PENANGANAN</b>\n"
 
     for x in rec:
+
         msg+=f"• {x}\n"
 
     msg+="\n🔬 <b>PENGUJIAN TANAH</b>\n"
 
     for x in tst:
+
         msg+=f"• {x}\n"
 
     tg(msg,chat_id)
 
-# =====================
+# =========================
 # TELEGRAM LOOP
-# =====================
+# =========================
 
 def check_messages():
 
