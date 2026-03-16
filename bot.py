@@ -92,6 +92,7 @@ def check_quota(chat_id):
 def get_location(lat,lon):
 
     try:
+
         r=requests.get(
             "https://nominatim.openstreetmap.org/reverse",
             params={"lat":lat,"lon":lon,"format":"json"},
@@ -169,6 +170,26 @@ def get_soil_profile(lat,lon):
         }
 
     return profile
+
+def aggregate_profile(profile):
+
+    def avg(keys,field):
+        return sum(profile[k][field] for k in keys)/len(keys)
+
+    agg={}
+
+    agg["0-30cm"]={
+        "clay":avg(["0-5cm","5-15cm","15-30cm"],"clay"),
+        "sand":avg(["0-5cm","5-15cm","15-30cm"],"sand"),
+        "silt":avg(["0-5cm","5-15cm","15-30cm"],"silt"),
+        "bdod":avg(["0-5cm","5-15cm","15-30cm"],"bdod"),
+        "soc":avg(["0-5cm","5-15cm","15-30cm"],"soc")
+    }
+
+    agg["30-60cm"]=profile["30-60cm"]
+    agg["60-100cm"]=profile["60-100cm"]
+
+    return agg
 
 def get_slope(lat,lon):
 
@@ -282,20 +303,12 @@ def model_confidence(clay,sand,silt,bdod):
 
     return score
 
-def detect_soft(clay,bdod):
-    return clay>35 and bdod<1.2
-
-def detect_expansive(clay):
-    return clay>40
-
-def detect_liquefaction(sand,bdod):
-    return sand>65 and bdod<1.4
-
 def analyze_soil(lat,lon,chat_id):
 
     tg("⏳ Menganalisis tanah...",chat_id)
 
-    profile=get_soil_profile(lat,lon)
+    raw_profile=get_soil_profile(lat,lon)
+    profile=aggregate_profile(raw_profile)
 
     location=get_location(lat,lon)
     road=get_road(lat,lon)
@@ -311,17 +324,13 @@ def analyze_soil(lat,lon,chat_id):
 
     soil_type=classify_soil(clay,sand,silt)
 
-    peat=detect_peat(profile["0-5cm"]["soc"],profile["0-5cm"]["bdod"])
+    peat=detect_peat(raw_profile["0-5cm"]["soc"],raw_profile["0-5cm"]["bdod"])
 
     cbr=estimate_cbr(clay,sand,silt,bdod,soc,rain)
 
     hard=estimate_hard_layer(profile)
 
     confidence=model_confidence(clay,sand,silt,bdod)
-
-    soft=detect_soft(clay,bdod)
-    expansive=detect_expansive(clay)
-    liquefaction=detect_liquefaction(sand,bdod)
 
     msg=f"""
 🌍 <b>LAPORAN INTERPRETASI TANAH — AI ANALYSIS</b>
@@ -357,9 +366,9 @@ def analyze_soil(lat,lon,chat_id):
 <b>{confidence}%</b>
 
 {"🌱 Indikasi gambut" if peat else "🌱 Tidak terindikasi gambut"}
-{"⚠ Tanah lunak" if soft else ""}
-{"⚠ Tanah ekspansif" if expansive else ""}
-{"⚠ Potensi likuifaksi" if liquefaction else ""}
+
+━━━━━━━━━━━━
+🪨 <b>PROFIL TANAH (hingga 1 m)</b>
 """
 
     for d,data in profile.items():
@@ -367,7 +376,6 @@ def analyze_soil(lat,lon,chat_id):
         soil=classify_soil(data["clay"],data["sand"],data["silt"])
 
         msg+=f"""
-
 {d}
 Jenis tanah : {soil}
 Clay {data["clay"]:.1f} %
@@ -402,7 +410,7 @@ Organic Carbon {data["soc"]:.1f} %
 ━━━━━━━━━━━━
 🤖 <b>CATATAN ANALISIS AI</b>
 
-Analisis ini merupakan <b>preliminary assessment</b> berbasis data SoilGrids melalui Google Earth Engine.
+Analisis ini merupakan <b>preliminary assessment</b> berbasis SoilGrids melalui Google Earth Engine.
 
 Hasil digunakan sebagai indikasi awal kondisi tanah dan tidak menggantikan investigasi geoteknik lapangan.
 """
@@ -430,34 +438,6 @@ def check_messages():
                 chat_id=str(msg.get("chat",{}).get("id",""))
                 text=msg.get("text","")
 
-                if text.startswith("/approve") and chat_id==ADMIN_ID:
-
-                    uid=text.split(" ")[1]
-
-                    users=load_users()
-
-                    users["approved"].append(uid)
-
-                    save_users(users)
-
-                    tg("✅ Approved",uid)
-
-                    continue
-
-                status=check_user(chat_id)
-
-                if status!="approved":
-
-                    tg("⛔ Menunggu persetujuan admin",chat_id)
-
-                    continue
-
-                if not check_quota(chat_id):
-
-                    tg("⚠ Kuota harian habis",chat_id)
-
-                    continue
-
                 coord=re.search(r"(-?\d+\.?\d*)[, ]+(-?\d+\.?\d*)",text)
 
                 if coord:
@@ -466,10 +446,6 @@ def check_messages():
                     lon=float(coord.group(2))
 
                     analyze_soil(lat,lon,chat_id)
-
-                else:
-
-                    tg("📍 Kirim koordinat\n-7.6048,111.9102",chat_id)
 
         except Exception as e:
 
