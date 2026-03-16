@@ -15,7 +15,7 @@ def tg(msg, chat_id=None):
     )
 
 def get_soil_all(lat, lon):
-    url = "https://api-test.openepi.io/soil/property"
+    url = "https://api.openepi.io/soil/property"
     params = [
         ("lon", lon), ("lat", lat),
         ("depths", "0-5cm"), ("depths", "5-15cm"), ("depths", "15-30cm"),
