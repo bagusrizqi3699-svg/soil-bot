@@ -15,7 +15,6 @@ log=logging.getLogger(__name__)
 last_update_id=0
 
 # ================= INIT GEE =================
-
 service_account=json.loads(os.environ["GEE_KEY"])
 
 credentials=ee.ServiceAccountCredentials(
@@ -26,7 +25,6 @@ credentials=ee.ServiceAccountCredentials(
 ee.Initialize(credentials)
 
 # ================= TELEGRAM =================
-
 def tg(msg,chat_id):
     try:
         requests.post(
@@ -37,77 +35,33 @@ def tg(msg,chat_id):
     except:
         log.error("Telegram error")
 
-# ================= LOCATION =================
-
-def get_location(lat,lon):
-    try:
-        r=requests.get(
-            "https://nominatim.openstreetmap.org/reverse",
-            params={"lat":lat,"lon":lon,"format":"json"},
-            headers={"User-Agent":"soilbot"},
-            timeout=10
-        )
-        addr=r.json()["address"]
-        return f"{addr.get('city','')}, {addr.get('state','')}, {addr.get('country','')}"
-    except:
-        return "Tidak terdeteksi"
-
-# ================= ROAD =================
-
-def get_road(lat,lon):
-    try:
-        q=f"""
-        [out:json];
-        way(around:100,{lat},{lon})["highway"];
-        out tags 1;
-        """
-        r=requests.post(
-            "https://overpass-api.de/api/interpreter",
-            data=q,
-            timeout=10
-        )
-        data=r.json()
-        if not data["elements"]:
-            return None
-        return data["elements"][0]["tags"].get("name")
-    except:
-        return None
-
-# ================= SAFE DIV =================
-
+# ================= SAFE =================
 def safe(v,div):
-    try:
-        if v is None:
-            return 0
-        return v/div
-    except:
-        return 0
+    if v is None:
+        return None
+    return v/div
 
 # ================= SOIL =================
-
 def get_soil_profile(lat,lon):
 
     point=ee.Geometry.Point([lon,lat])
+    soil=ee.Image("projects/soilgrids-isric/soilgrids_250m")
 
     depths=["0-5cm","5-15cm","15-30cm","30-60cm","60-100cm"]
-
-    clay=ee.Image("projects/soilgrids-isric/clay_mean")
-    sand=ee.Image("projects/soilgrids-isric/sand_mean")
-    silt=ee.Image("projects/soilgrids-isric/silt_mean")
-    bdod=ee.Image("projects/soilgrids-isric/bdod_mean")
-    soc=ee.Image("projects/soilgrids-isric/soc_mean")
 
     profile={}
 
     for d in depths:
 
-        img=clay.select(f"clay_{d}_mean")\
-        .addBands(sand.select(f"sand_{d}_mean"))\
-        .addBands(silt.select(f"silt_{d}_mean"))\
-        .addBands(bdod.select(f"bdod_{d}_mean"))\
-        .addBands(soc.select(f"soc_{d}_mean"))
+        bands=[
+            f"clay_{d}_mean",
+            f"sand_{d}_mean",
+            f"silt_{d}_mean",
+            f"bdod_{d}_mean",
+            f"soc_{d}_mean"
+        ]
 
-        vals=img.reduceRegion(
+        vals=soil.select(bands).reduceRegion(
             reducer=ee.Reducer.mean(),
             geometry=point,
             scale=250,
@@ -115,21 +69,21 @@ def get_soil_profile(lat,lon):
         ).getInfo()
 
         profile[d]={
-            "clay":safe(vals.get(f"clay_{d}_mean"),10),
-            "sand":safe(vals.get(f"sand_{d}_mean"),10),
-            "silt":safe(vals.get(f"silt_{d}_mean"),10),
-            "bdod":safe(vals.get(f"bdod_{d}_mean"),100),
-            "soc":safe(vals.get(f"soc_{d}_mean"),100)
+            "clay":safe(vals.get(bands[0]),10),
+            "sand":safe(vals.get(bands[1]),10),
+            "silt":safe(vals.get(bands[2]),10),
+            "bdod":safe(vals.get(bands[3]),100),
+            "soc":safe(vals.get(bands[4]),100)
         }
 
     return profile
 
 # ================= AGGREGATE =================
-
-def aggregate_profile(p):
+def aggregate(p):
 
     def avg(keys,f):
-        return sum(p[k][f] for k in keys)/len(keys)
+        vals=[p[k][f] for k in keys if p[k][f] is not None]
+        return sum(vals)/len(vals) if vals else 0
 
     return {
         "0-30cm":{
@@ -144,7 +98,6 @@ def aggregate_profile(p):
     }
 
 # ================= TERRAIN =================
-
 def get_slope(lat,lon):
 
     point=ee.Geometry.Point([lon,lat])
@@ -160,7 +113,6 @@ def get_slope(lat,lon):
     return ee.Number(val).getInfo()
 
 # ================= RAIN =================
-
 def get_rain(lat,lon):
 
     point=ee.Geometry.Point([lon,lat])
@@ -179,17 +131,23 @@ def get_rain(lat,lon):
 
 # ================= MODEL =================
 
-def classify_soil(c,s,si):
-    if c>=s and c>=si: return "Lempung"
-    if si>=c and si>=s: return "Lanau"
+def classify(c,s,si):
+
+    if c>=s and c>=si:
+        return "Lempung"
+
+    if si>=c and si>=s:
+        return "Lanau"
+
     return "Pasir"
 
-def detect_peat(soc,bdod):
-    return soc>=20 and bdod<=1.2
+def peat(soc,bdod):
+    return soc and soc>20 and bdod and bdod<1.2
 
 def estimate_cbr(c,s,si,bdod,soc,rain):
 
-    if soc>20 and bdod<1.15: return 1
+    if soc and soc>20:
+        return 1.5
 
     if c>45: v=3
     elif c>35: v=4
@@ -197,40 +155,67 @@ def estimate_cbr(c,s,si,bdod,soc,rain):
     elif s>60: v=15
     else: v=8
 
-    if bdod>1.35: v*=1.3
-    elif bdod<1.1: v*=0.7
+    if bdod:
+        if bdod>1.35: v*=1.3
+        elif bdod<1.1: v*=0.7
 
-    if rain>2500: v*=0.85
+    if rain>2500:
+        v*=0.85
 
     return round(v,1)
 
-def estimate_hard_layer(p):
-    bd=p["60-100cm"]["bdod"]
+# ================= AUTO DETECT =================
+
+def soil_origin(slope,rain,sand):
+
+    if slope<3:
+        return "Alluvial (endapan sungai)"
+
+    if slope>8:
+        return "Residual (pelapukan batuan)"
+
+    if sand>50:
+        return "Material berpasir (kemungkinan fluvial/pantai)"
+
+    return "Transisi / campuran"
+
+# ================= SETTLEMENT =================
+
+def settlement(cbr,clay,soc):
+
+    if soc and soc>20:
+        return "Sangat besar (>10 cm)"
+
+    if cbr<3:
+        return "Besar (5–10 cm)"
+
+    if cbr<6:
+        return "Sedang (2–5 cm)"
+
+    if clay>40:
+        return "Sedang (2–5 cm)"
+
+    return "Kecil (<2 cm)"
+
+# ================= HARD LAYER =================
+
+def hard_layer(bd):
+
     if bd>=1.45: return "±0.8 m"
     if bd>=1.38: return "±1.0 m"
     if bd>=1.32: return "±1.3 m"
     if bd>=1.28: return "±1.6 m"
-    return ">2 m"
 
-def model_confidence(c,s,si,bd):
-    score=70
-    if bd>1.35: score+=5
-    if bd<1.1: score-=10
-    return max(60,min(score,85))
+    return ">2 m"
 
 # ================= ANALYZE =================
 
-def analyze_soil(lat,lon,chat_id):
+def analyze(lat,lon,chat_id):
 
-    log.info(f"Analyze {lat},{lon}")
-
-    tg("⏳ Menganalisis tanah...",chat_id)
+    tg("⏳ Analisis berjalan...",chat_id)
 
     raw=get_soil_profile(lat,lon)
-    p=aggregate_profile(raw)
-
-    loc=get_location(lat,lon)
-    road=get_road(lat,lon)
+    p=aggregate(raw)
 
     rain=get_rain(lat,lon)
     slope=get_slope(lat,lon)
@@ -239,98 +224,71 @@ def analyze_soil(lat,lon,chat_id):
     sand=p["30-60cm"]["sand"]
     silt=p["30-60cm"]["silt"]
     soc=p["30-60cm"]["soc"]
-    bdod=p["30-60cm"]["bdod"]
+    bd=p["30-60cm"]["bdod"]
 
-    soil=classify_soil(clay,sand,silt)
-    peat=detect_peat(raw["0-5cm"]["soc"],raw["0-5cm"]["bdod"])
+    soil=classify(clay,sand,silt)
 
-    cbr=estimate_cbr(clay,sand,silt,bdod,soc,rain)
-    hard=estimate_hard_layer(p)
-    conf=model_confidence(clay,sand,silt,bdod)
+    is_peat=peat(raw["0-5cm"]["soc"],raw["0-5cm"]["bdod"])
+
+    cbr=estimate_cbr(clay,sand,silt,bd,soc,rain)
+
+    origin=soil_origin(slope,rain,sand)
+
+    settle=settlement(cbr,clay,soc)
+
+    hard=hard_layer(bd if bd else 0)
 
     msg=f"""
 🌍 <b>LAPORAN INTERPRETASI TANAH — AI ANALYSIS</b>
 
-📍 Koordinat
-{lat}, {lon}
-
-🗺 Wilayah
-{loc}
-
-🛣 Jalan
-{road if road else "Tidak terdeteksi"}
+📍 {lat}, {lon}
 
 ━━━━━━━━━━━━
-🔎 <b>RINGKASAN CEPAT</b>
+🔎 <b>RINGKASAN</b>
 
-🪨 Jenis tanah dominan
-<b>{soil}</b>
+Jenis tanah: <b>{soil}</b>
+CBR: <b>{cbr}%</b>
+Curah hujan: <b>{rain:.0f} mm</b>
+Kemiringan: <b>{slope:.1f}°</b>
+Tanah keras: <b>{hard}</b>
 
-🚧 Estimasi CBR
-<b>{cbr}%</b>
+🌍 Asal tanah: <b>{origin}</b>
+📉 Potensi penurunan: <b>{settle}</b>
 
-🌧 Curah hujan
-<b>{rain:.0f} mm/tahun</b>
-
-⛰ Kemiringan lereng
-<b>{slope:.1f}°</b>
-
-🧱 Perkiraan tanah keras
-<b>{hard}</b>
-
-🤖 Kepercayaan AI
-<b>{conf}%</b>
-
-{"🌱 Indikasi gambut" if peat else "🌱 Tidak terindikasi gambut"}
+{"🌱 Gambut terindikasi" if is_peat else "🌱 Bukan gambut"}
 
 ━━━━━━━━━━━━
-🪨 <b>PROFIL TANAH (0–1 m)</b>
+🪨 <b>PROFIL TANAH</b>
 """
 
     for d,data in p.items():
+
         msg+=f"""
 {d}
-Jenis tanah : {classify_soil(data["clay"],data["sand"],data["silt"])}
-Clay {data["clay"]:.1f} %
-Sand {data["sand"]:.1f} %
-Silt {data["silt"]:.1f} %
-Bulk Density {data["bdod"]:.2f} g/cm³
-Organic Carbon {data["soc"]:.1f} %
+{classify(data["clay"],data["sand"],data["silt"])}
+Clay {data["clay"]:.1f}%
+Sand {data["sand"]:.1f}%
+Silt {data["silt"]:.1f}%
 """
 
     msg+=f"""
 
 ━━━━━━━━━━━━
-⚠ <b>DAMPAK TERHADAP PERKERASAN</b>
+⚠ <b>DAMPAK</b>
 
-1. Retak reflektif
-2. Rutting / ambles
-3. Genangan air
-
-🛠 <b>REKOMENDASI</b>
-
-• Stabilisasi tanah
-• Geotextile
-• Drainase baik
-
-🔬 <b>PENGUJIAN</b>
-
-• Field CBR
-• Atterberg
-• DCP
-• Sondir
+1. Retak
+2. Ambles
+3. Genangan
 
 ━━━━━━━━━━━━
-🤖 <b>CATATAN</b>
-
-Preliminary AI analysis — wajib verifikasi lapangan.
+🤖 Preliminary AI — wajib verifikasi lapangan
 """
 
     tg(msg,chat_id)
 
 # ================= LOOP =================
 
-def check_messages():
+def loop():
 
     global last_update_id
 
@@ -347,14 +305,13 @@ def check_messages():
 
                 last_update_id=u["update_id"]
 
-                msg=u.get("message",{})
-                chat_id=str(msg.get("chat",{}).get("id",""))
-                text=msg.get("text","")
+                text=u["message"]["text"]
+                chat=str(u["message"]["chat"]["id"])
 
                 coord=re.search(r"(-?\d+\.?\d*)[, ]+(-?\d+\.?\d*)",text)
 
                 if coord:
-                    analyze_soil(float(coord.group(1)),float(coord.group(2)),chat_id)
+                    analyze(float(coord.group(1)),float(coord.group(2)),chat)
 
         except Exception as e:
             log.error(e)
@@ -364,8 +321,8 @@ def check_messages():
 # ================= MAIN =================
 
 def main():
-    log.info("Soil AI Bot starting")
-    tg("🤖 AI Soil Analyzer siap digunakan",ADMIN_ID)
-    check_messages()
+    log.info("Bot running")
+    tg("🤖 Soil AI siap",ADMIN_ID)
+    loop()
 
 main()
