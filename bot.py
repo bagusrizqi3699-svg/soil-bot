@@ -234,7 +234,6 @@ def rain_label(r):
     return              "Sangat Basah", "🌊"
 
 def landslide_risk(slope, clay, silt, rain, bdod):
-    """Estimasi potensi longsor berdasarkan lereng, tanah, dan hujan"""
     if slope is None:
         return "N/A", "⬜"
     score = 0
@@ -255,10 +254,6 @@ def landslide_risk(slope, clay, silt, rain, bdod):
     return                  "Sangat Rendah", "🔵"
 
 def data_confidence(p, rain, slope):
-    """
-    Hitung tingkat kepercayaan data berdasarkan kelengkapan nilai GEE.
-    Semakin banyak None, semakin rendah kepercayaan.
-    """
     total  = 0
     filled = 0
     for d, data in p.items():
@@ -334,7 +329,7 @@ def road_issues(cbr, clay, sand, silt, soc, bdod, rain, slope, is_peat_flag):
             issues.append(("🟠", f"Kepadatan rendah (kepadatan {bdod:.2f} g/cm3) — perlu <b>pemadatan</b> sebelum konstruksi"))
 
     if soc is not None and 5 < soc <= 20:
-        issues.append(("🟠", f"Bahan organik cukup tinggi ( {soc:.1f}%) — <b>tanah tidak stabil</b>, rentan turun perlahan jangka panjang"))
+        issues.append(("🟠", f"Bahan organik cukup tinggi ({soc:.1f}%) — <b>tanah tidak stabil</b>, rentan turun perlahan jangka panjang"))
 
     if not issues:
         issues.append(("🟢", "<b>Tidak ada masalah signifikan</b> teridentifikasi berdasarkan data tersedia"))
@@ -345,7 +340,7 @@ def road_issues(cbr, clay, sand, silt, soc, bdod, rain, slope, is_peat_flag):
 
 def analyze(lat, lon, chat_id):
     log.info(f"Analyze start: {lat}, {lon}")
-    tg("⏳ Menganalisis tanah... mohon tunggu sebentar.", chat_id)
+    tg("Menganalisis tanah... mohon tunggu sebentar.", chat_id)
 
     local, region, country, cc = get_location_name(lat, lon)
     flag_em = flag(cc)
@@ -363,12 +358,19 @@ def analyze(lat, lon, chat_id):
 
     log.info(f"clay={clay} sand={sand} silt={silt} soc={soc} bd={bd} rain={rain} slope={slope}")
 
-    soil_name, soil_desc     = classify_detail(clay, sand, silt)
-    s_emoji                  = soil_emoji(soil_name)
-    is_peat_flag             = peat(raw["0-5cm"]["soc"], raw["0-5cm"]["bdod"])
+    soil_name, soil_desc = classify_detail(clay, sand, silt)
+    s_emoji              = soil_emoji(soil_name)
+
+    # ---- FIX: cek gambut dari SEMUA layer (raw) ----
+    all_depths   = ["0-5cm", "5-15cm", "15-30cm", "30-60cm", "60-100cm"]
+    soc_max      = max([v for v in [raw[d]["soc"]  for d in all_depths] if v is not None], default=None)
+    bd_min       = min([v for v in [raw[d]["bdod"] for d in all_depths] if v is not None], default=None)
+    is_peat_flag = peat(soc_max, bd_min)
+    # ------------------------------------------------
+
     cbr                      = estimate_cbr(clay, sand, silt, bd, soc, rain)
     cbr_lbl, cbr_em          = cbr_label(cbr)
-    settle, set_em           = estimate_settlement(cbr, clay, soc)
+    settle, set_em           = estimate_settlement(cbr, clay, soc_max)
     hard                     = hard_layer(bd)
     slope_lbl, slope_em      = slope_label(slope)
     rain_lbl, rain_em        = rain_label(rain)
@@ -383,8 +385,14 @@ def analyze(lat, lon, chat_id):
     rain_txt  = f"{rain_em} <b>{rain:.0f} mm/thn</b>  ({rain_lbl})" if rain is not None else "N/A"
     slope_txt = f"{slope_em} <b>{slope:.1f} deg</b>  ({slope_lbl})"
 
-    issues     = road_issues(cbr, clay, sand, silt, soc, bd, rain, slope, is_peat_flag)
+    issues     = road_issues(cbr, clay, sand, silt, soc_max, bd, rain, slope, is_peat_flag)
     issues_txt = "\n".join(f"  {em} {desc}" for em, desc in issues)
+
+    peat_soc_note = f" (SOC maks {soc_max:.1f}%)" if soc_max is not None else ""
+    peat_line = (
+        f"  {'🌿' if is_peat_flag else '✅'} <b>Gambut</b>     : "
+        f"{'Terindikasi' if is_peat_flag else 'Tidak terindikasi'}{peat_soc_note}\n\n"
+    )
 
     msg = (
         f"🌍 <b>AI SOIL ANALYSIS REPORT</b> 🌍\n"
@@ -408,7 +416,7 @@ def analyze(lat, lon, chat_id):
         f"  🧱 <b>Tanah Keras</b> : {hard}\n"
         f"  {set_em} <b>Penurunan</b>  : {settle}\n"
         f"  {ls_em} <b>Longsor</b>    : {ls_risk}\n"
-        f"  {'🌿' if is_peat_flag else '✅'} <b>Gambut</b>     : {'Terindikasi' if is_peat_flag else 'Tidak terindikasi'}\n\n"
+        + peat_line +
 
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🪨 <b>PROFIL TANAH DETAIL</b>\n"
@@ -493,7 +501,7 @@ def main():
     except Exception as e:
         log.error(f"deleteWebhook error: {e}")
     log.info("Bot running")
-    tg("🤖 Soil AI siap digunakan!", ADMIN_ID)
+    tg("Bot Soil AI siap digunakan!", ADMIN_ID)
     loop()
 
 main()
