@@ -32,7 +32,10 @@ def tg(msg, chat_id):
             json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"},
             timeout=15
         )
-        log.info(f"TG send status: {r.status_code}")
+        if r.status_code != 200:
+            log.error(f"TG error {r.status_code}: {r.text}")
+        else:
+            log.info(f"TG send status: 200")
     except Exception as e:
         log.error(f"Telegram error: {e}")
 
@@ -41,7 +44,6 @@ def get_soil_profile(lat, lon):
 
     point = ee.Geometry.Point([lon, lat])
 
-    # Index band per depth (urutan: 0-5, 5-15, 15-30, 30-60, 60-100, 100-200)
     depth_index = {
         "0-5cm":    0,
         "5-15cm":   1,
@@ -64,7 +66,6 @@ def get_soil_profile(lat, lon):
         profile[d] = {}
         for prop, ds in datasets.items():
             try:
-                # Pakai index band bukan nama — hindari masalah karakter '-'
                 img = ee.Image(ds).select(idx)
                 result = img.reduceRegion(
                     reducer=ee.Reducer.mean(),
@@ -72,7 +73,6 @@ def get_soil_profile(lat, lon):
                     scale=250,
                     bestEffort=True
                 )
-                # Ambil nilai dari key pertama (nama band apapun)
                 keys = result.keys().getInfo()
                 val = ee.Number(result.get(keys[0])).getInfo() if keys else None
             except Exception as e:
@@ -189,20 +189,20 @@ def estimate_settlement(cbr, clay, soc):
     if cbr is None:
         return "N/A"
     if cbr < 3:
-        return "Besar (5–10 cm)"
+        return "Besar (5-10 cm)"      # pakai - bukan en-dash
     if cbr < 6:
-        return "Sedang (2–5 cm)"
+        return "Sedang (2-5 cm)"
     if clay is not None and clay > 40:
-        return "Sedang (2–5 cm)"
+        return "Sedang (2-5 cm)"
     return "Kecil (<2 cm)"
 
 def hard_layer(bd):
     if bd is None:
         return "N/A"
-    if bd >= 1.45: return "±0.8 m"
-    if bd >= 1.38: return "±1.0 m"
-    if bd >= 1.32: return "±1.3 m"
-    if bd >= 1.28: return "±1.6 m"
+    if bd >= 1.45: return "+-0.8 m"
+    if bd >= 1.38: return "+-1.0 m"
+    if bd >= 1.32: return "+-1.3 m"
+    if bd >= 1.28: return "+-1.6 m"
     return ">2 m"
 
 # ================= ANALYZE =================
@@ -210,7 +210,7 @@ def hard_layer(bd):
 def analyze(lat, lon, chat_id):
 
     log.info(f"Analyze start: {lat}, {lon}")
-    tg("⏳ Analisis tanah...", chat_id)
+    tg("Analisis tanah...", chat_id)
 
     raw = get_soil_profile(lat, lon)
     p = aggregate(raw)
@@ -234,67 +234,43 @@ def analyze(lat, lon, chat_id):
 
     cbr_txt   = f"{cbr}%" if cbr is not None else "N/A"
     rain_txt  = f"{rain:.0f} mm/tahun" if rain is not None else "N/A"
-    slope_txt = f"{slope:.1f}°" if slope is not None else "N/A"
+    slope_txt = f"{slope:.1f} derajat" if slope is not None else "N/A"
 
-    msg = f"""
-🌍 <b>LAPORAN INTERPRETASI TANAH — AI ANALYSIS</b>
-
-📍 Koordinat
-{lat}, {lon}
-
-━━━━━━━━━━━━
-🔎 <b>RINGKASAN CEPAT</b>
-
-🪨 Jenis tanah dominan
-<b>{soil}</b>
-
-🚧 Estimasi CBR
-<b>{cbr_txt}</b>
-
-🌧 Curah hujan
-<b>{rain_txt}</b>
-
-⛰ Kemiringan lereng
-<b>{slope_txt}</b>
-
-🧱 Perkiraan tanah keras
-<b>{hard}</b>
-
-📉 Potensi penurunan
-<b>{settlement}</b>
-
-{"🌱 Tidak terindikasi gambut" if not is_peat else "🌱 Indikasi gambut"}
-
-━━━━━━━━━━━━
-🪨 <b>PROFIL TANAH (hingga 1 m)</b>
-"""
+    msg = (
+        f"LAPORAN INTERPRETASI TANAH\n\n"
+        f"Koordinat: {lat}, {lon}\n\n"
+        f"--- RINGKASAN ---\n"
+        f"Jenis tanah   : <b>{soil}</b>\n"
+        f"Estimasi CBR  : <b>{cbr_txt}</b>\n"
+        f"Curah hujan   : <b>{rain_txt}</b>\n"
+        f"Kemiringan    : <b>{slope_txt}</b>\n"
+        f"Tanah keras   : <b>{hard}</b>\n"
+        f"Penurunan     : <b>{settlement}</b>\n"
+        f"Gambut        : <b>{'Ya' if is_peat else 'Tidak'}</b>\n\n"
+        f"--- PROFIL TANAH ---\n"
+    )
 
     for d, data in p.items():
         clay_txt = f"{data['clay']:.1f}%" if data["clay"] is not None else "N/A"
         sand_txt = f"{data['sand']:.1f}%" if data["sand"] is not None else "N/A"
         silt_txt = f"{data['silt']:.1f}%" if data["silt"] is not None else "N/A"
-        msg += f"""
-{d}
-Jenis tanah : {classify(data["clay"], data["sand"], data["silt"])}
-Clay {clay_txt}
-Sand {sand_txt}
-Silt {silt_txt}
-"""
+        soil_d   = classify(data["clay"], data["sand"], data["silt"])
+        msg += (
+            f"\n{d}\n"
+            f"  Jenis : {soil_d}\n"
+            f"  Clay  : {clay_txt}\n"
+            f"  Sand  : {sand_txt}\n"
+            f"  Silt  : {silt_txt}\n"
+        )
 
-    msg += f"""
-━━━━━━━━━━━━
-⚠ <b>DAMPAK TERHADAP PERKERASAN</b>
-
-1. Retak reflektif akibat kembang susut tanah
-2. Rutting / ambles akibat daya dukung rendah
-3. Genangan air saat hujan tinggi
-
-━━━━━━━━━━━━
-🤖 <b>CATATAN ANALISIS AI</b>
-
-Analisis ini merupakan <b>preliminary assessment</b> berbasis SoilGrids melalui Google Earth Engine.
-Wajib verifikasi investigasi tanah lapangan.
-"""
+    msg += (
+        f"\n--- DAMPAK PERKERASAN ---\n"
+        f"1. Retak reflektif akibat kembang susut\n"
+        f"2. Rutting / ambles akibat daya dukung rendah\n"
+        f"3. Genangan air saat hujan tinggi\n\n"
+        f"<i>Preliminary assessment berbasis SoilGrids/GEE. "
+        f"Wajib verifikasi lapangan.</i>"
+    )
 
     tg(msg, chat_id)
     log.info("Analyze done")
@@ -333,8 +309,7 @@ def main():
     except Exception as e:
         log.error(f"deleteWebhook error: {e}")
     log.info("Bot running")
-    tg("🤖 Soil AI siap digunakan", ADMIN_ID)
+    tg("Soil AI siap digunakan", ADMIN_ID)
     loop()
 
 main()
-                
