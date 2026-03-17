@@ -61,7 +61,6 @@ def get_soil_profile(lat,lon):
             band=f"{prop}_{d}_mean"
 
             try:
-
                 val=ee.Image(ds).select(band).reduceRegion(
                     reducer=ee.Reducer.mean(),
                     geometry=point,
@@ -69,7 +68,7 @@ def get_soil_profile(lat,lon):
                     bestEffort=True
                 ).get(band)
 
-                val=ee.Number(val).getInfo() if val else None
+                val=ee.Number(val).getInfo() if val is not None else None
 
             except:
                 val=None
@@ -83,7 +82,7 @@ def get_soil_profile(lat,lon):
                 elif prop in ["bdod","soc"]:
                     val=val/100
 
-            profile[d][prop]=val if val is not None else 0
+            profile[d][prop]=val
 
     return profile
 
@@ -92,7 +91,7 @@ def aggregate(p):
 
     def avg(keys,f):
         vals=[p[k][f] for k in keys if p[k][f] is not None]
-        return sum(vals)/len(vals) if vals else 0
+        return sum(vals)/len(vals) if vals else None
 
     return {
         "0-30cm":{
@@ -142,6 +141,8 @@ def get_rain(lat,lon):
 
 def classify(c,s,si):
 
+    if c is None: return "N/A"
+
     if c>=s and c>=si:
         return "Lempung"
     if si>=c and si>=s:
@@ -149,11 +150,11 @@ def classify(c,s,si):
     return "Pasir"
 
 def peat(soc,bdod):
-    return soc>20 and bdod<1.2
+    return soc is not None and soc>20 and bdod is not None and bdod<1.2
 
 def estimate_cbr(c,s,si,bdod,soc,rain):
 
-    if soc>20:
+    if soc is not None and soc>20:
         return 1.5
 
     if c>45: v=3
@@ -162,42 +163,42 @@ def estimate_cbr(c,s,si,bdod,soc,rain):
     elif s>60: v=15
     else: v=8
 
-    if bdod>1.35: v*=1.3
-    elif bdod<1.1: v*=0.7
+    if bdod:
+        if bdod>1.35: v*=1.3
+        elif bdod<1.1: v*=0.7
 
     if rain>2500:
         v*=0.85
 
     return round(v,1)
 
-def soil_origin(slope,sand):
+# ================= SETTLEMENT =================
+def estimate_settlement(cbr, clay, soc):
 
-    if slope<3:
-        return "Alluvial"
-    if slope>8:
-        return "Residual"
-    if sand>50:
-        return "Material berpasir"
-    return "Transisi"
-
-def settlement(cbr,clay,soc):
-
-    if soc>20:
+    if soc is not None and soc > 20:
         return "Sangat besar (>10 cm)"
-    if cbr<3:
+
+    if cbr < 3:
         return "Besar (5–10 cm)"
-    if cbr<6:
+
+    if cbr < 6:
         return "Sedang (2–5 cm)"
-    if clay>40:
+
+    if clay is not None and clay > 40:
         return "Sedang (2–5 cm)"
+
     return "Kecil (<2 cm)"
 
 def hard_layer(bd):
+
+    if bd is None:
+        return "N/A"
 
     if bd>=1.45: return "±0.8 m"
     if bd>=1.38: return "±1.0 m"
     if bd>=1.32: return "±1.3 m"
     if bd>=1.28: return "±1.6 m"
+
     return ">2 m"
 
 # ================= ANALYZE =================
@@ -224,50 +225,71 @@ def analyze(lat,lon,chat_id):
 
     cbr=estimate_cbr(clay,sand,silt,bd,soc,rain)
 
-    origin=soil_origin(slope,sand)
-
-    settle=settlement(cbr,clay,soc)
+    settlement=estimate_settlement(cbr,clay,soc)
 
     hard=hard_layer(bd)
 
     msg=f"""
 🌍 <b>LAPORAN INTERPRETASI TANAH — AI ANALYSIS</b>
 
-📍 {lat}, {lon}
+📍 Koordinat
+{lat}, {lon}
 
 ━━━━━━━━━━━━
-🔎 <b>RINGKASAN</b>
+🔎 <b>RINGKASAN CEPAT</b>
 
-Jenis tanah: <b>{soil}</b>
-CBR: <b>{cbr}%</b>
-Curah hujan: <b>{rain:.0f} mm</b>
-Kemiringan: <b>{slope:.1f}°</b>
-Tanah keras: <b>{hard}</b>
+🪨 Jenis tanah dominan
+<b>{soil}</b>
 
-🌍 Asal tanah: <b>{origin}</b>
-📉 Potensi penurunan: <b>{settle}</b>
+🚧 Estimasi CBR
+<b>{cbr}%</b>
 
-{"🌱 Gambut" if is_peat else "🌱 Non gambut"}
+🌧 Curah hujan
+<b>{rain:.0f} mm/tahun</b>
+
+⛰ Kemiringan lereng
+<b>{slope:.1f}°</b>
+
+🧱 Perkiraan tanah keras
+<b>{hard}</b>
+
+📉 Potensi penurunan
+<b>{settlement}</b>
+
+{"🌱 Tidak terindikasi gambut" if not is_peat else "🌱 Indikasi gambut"}
 
 ━━━━━━━━━━━━
-🪨 <b>PROFIL TANAH</b>
+🪨 <b>PROFIL TANAH (hingga 1 m)</b>
 """
 
     for d,data in p.items():
+
+        clay_txt = f"{data['clay']:.1f}%" if data["clay"] is not None else "N/A"
+        sand_txt = f"{data['sand']:.1f}%" if data["sand"] is not None else "N/A"
+        silt_txt = f"{data['silt']:.1f}%" if data["silt"] is not None else "N/A"
+
         msg+=f"""
 {d}
-{classify(data["clay"],data["sand"],data["silt"])}
-Clay {data["clay"]:.1f}%
-Sand {data["sand"]:.1f}%
-Silt {data["silt"]:.1f}%
+Jenis tanah : {classify(data["clay"],data["sand"],data["silt"])}
+Clay {clay_txt}
+Sand {sand_txt}
+Silt {silt_txt}
 """
 
     msg+=f"""
 
 ━━━━━━━━━━━━
-⚠ Dampak: retak, ambles, genangan
+⚠ <b>DAMPAK TERHADAP PERKERASAN</b>
 
-🤖 Preliminary AI — wajib verifikasi lapangan
+1. Retak reflektif akibat kembang susut tanah
+2. Rutting / ambles akibat daya dukung rendah
+3. Genangan air saat hujan tinggi
+
+━━━━━━━━━━━━
+🤖 <b>CATATAN ANALISIS AI</b>
+
+Analisis ini merupakan <b>preliminary assessment</b> berbasis SoilGrids melalui Google Earth Engine.
+Wajib verifikasi investigasi tanah lapangan.
 """
 
     tg(msg,chat_id)
