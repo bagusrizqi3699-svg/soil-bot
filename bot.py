@@ -142,6 +142,7 @@ def get_rain(lat, lon):
         return None
 
 # ================= CLASSIFICATION =================
+
 def classify_detail(c, s, si):
     if c is None or s is None or si is None:
         return "N/A", "Data tidak tersedia"
@@ -179,43 +180,315 @@ def bar(val, max_val=100, length=10):
 def peat(soc, bdod):
     return soc is not None and soc > 20 and bdod is not None and bdod < 1.2
 
-# ================= CBR FIX =================
 def estimate_cbr(c, s, si, bdod, soc, rain):
-    if c is None or s is None or si is None:
-        return None
+    if c is None or s is None or si is None: return None
+    if soc is not None and soc > 20: return 1.5
+    if c > 45:   v = 3
+    elif c > 35: v = 4
+    elif c > 25: v = 6
+    elif s > 60: v = 15
+    else:        v = 8
+    if bdod:
+        if bdod > 1.35:  v *= 1.3
+        elif bdod < 1.1: v *= 0.7
+    if rain is not None and rain > 2500: v *= 0.85
+    return round(v, 1)
 
-    if soc is not None and soc > 20:
-        return 1.5
+def cbr_label(cbr):
+    if cbr is None:  return "N/A", "⬜"
+    if cbr < 3:      return "Sangat Lemah", "🔴"
+    if cbr < 6:      return "Lemah", "🟠"
+    if cbr < 10:     return "Sedang", "🟡"
+    if cbr < 20:     return "Baik", "🟢"
+    return                  "Sangat Baik", "🔵"
 
-    if s >= 70:
-        v = 25
-    elif s >= 55:
-        v = 18
-    elif s >= 45:
-        v = 12
-    elif c >= 40:
-        v = 4
-    elif c >= 30:
-        v = 6
-    else:
-        v = 10
+def estimate_settlement(cbr, clay, soc):
+    if soc is not None and soc > 20: return "Sangat Besar (di atas 10 cm)", "🔴"
+    if cbr is None:                  return "N/A", "⬜"
+    if cbr < 3:                      return "Besar (5-10 cm)", "🟠"
+    if cbr < 6:                      return "Sedang (2-5 cm)", "🟡"
+    if clay is not None and clay > 40: return "Sedang (2-5 cm)", "🟡"
+    return                               "Kecil (di bawah 2 cm)", "🟢"
 
-    if bdod is not None:
-        if bdod >= 1.40:
-            v *= 1.25
-        elif bdod <= 1.20:
-            v *= 0.75
+def hard_layer(bd):
+    if bd is None:  return "N/A"
+    if bd >= 1.45:  return "+-0.8 m"
+    if bd >= 1.38:  return "+-1.0 m"
+    if bd >= 1.32:  return "+-1.3 m"
+    if bd >= 1.28:  return "+-1.6 m"
+    return                 "lebih dari 2 m"
+
+def slope_label(s):
+    if s < 2:  return "Datar", "🟢"
+    if s < 8:  return "Landai", "🟡"
+    if s < 15: return "Miring", "🟠"
+    if s < 30: return "Curam", "🔴"
+    return           "Sangat Curam", "🔴"
+
+def rain_label(r):
+    if r is None: return "N/A", "⬜"
+    if r < 500:   return "Sangat Kering", "🔴"
+    if r < 1500:  return "Kering", "🟠"
+    if r < 2500:  return "Normal", "🟢"
+    if r < 4000:  return "Basah", "🔵"
+    return              "Sangat Basah", "🌊"
+
+def landslide_risk(slope, clay, silt, rain, bdod):
+    """Estimasi potensi longsor berdasarkan lereng, tanah, dan hujan"""
+    if slope is None:
+        return "N/A", "⬜"
+    score = 0
+    if slope >= 30:   score += 4
+    elif slope >= 15: score += 3
+    elif slope >= 8:  score += 1
+    if rain is not None:
+        if rain > 3000:   score += 3
+        elif rain > 2000: score += 2
+        elif rain > 1500: score += 1
+    if clay is not None and clay > 35: score += 2
+    if silt is not None and silt > 40: score += 2
+    if bdod is not None and bdod < 1.1: score += 1
+    if score >= 7:   return "Sangat Tinggi", "🔴"
+    if score >= 5:   return "Tinggi", "🟠"
+    if score >= 3:   return "Sedang", "🟡"
+    if score >= 1:   return "Rendah", "🟢"
+    return                  "Sangat Rendah", "🔵"
+
+def data_confidence(p, rain, slope):
+    """
+    Hitung tingkat kepercayaan data berdasarkan kelengkapan nilai GEE.
+    Semakin banyak None, semakin rendah kepercayaan.
+    """
+    total  = 0
+    filled = 0
+    for d, data in p.items():
+        for v in data.values():
+            total += 1
+            if v is not None: filled += 1
+    if rain  is not None: filled += 1
+    total += 1
+    if slope is not None and slope > 0: filled += 1
+    total += 1
+
+    ratio = filled / total if total > 0 else 0
+
+    if ratio >= 0.90: return "Tinggi (di atas 90% data tersedia)", "🟢", ratio
+    if ratio >= 0.70: return "Sedang (70-90% data tersedia)", "🟡", ratio
+    if ratio >= 0.40: return "Rendah (40-70% data tersedia)", "🟠", ratio
+    return                   "Sangat Rendah (kurang dari 40% data tersedia)", "🔴", ratio
+
+def fmt(val, dec=2, unit="", fallback="0"):
+    if val is None: return fallback + unit
+    return f"{val:.{dec}f}{unit}"
+
+# ================= DYNAMIC ROAD ISSUES =================
+def road_issues(cbr, clay, sand, silt, soc, bdod, rain, slope, is_peat_flag):
+    issues = []
+
+    if is_peat_flag:
+        issues.append(("🔴", "<b>KRITIS:</b> Tanah gambut — penurunan masif tak terkendali"))
+        issues.append(("🔴", "Tidak direkomendasikan tanpa soil replacement atau pondasi dalam"))
+        return issues
+
+    if cbr is not None:
+        if cbr < 3:
+            issues.append(("🔴", f"<b>Daya dukung sangat rendah</b> (CBR <b>{cbr}%</b>, min. 6%) — lapis pondasi tebal wajib"))
+        elif cbr < 6:
+            issues.append(("🟠", f"<b>Daya dukung di bawah minimum</b> (CBR <b>{cbr}%</b>, min. 6%) — perlu perkuatan subgrade"))
+        elif cbr < 10:
+            issues.append(("🟡", f"Daya dukung <b>memenuhi standar jalan lokal</b> (CBR <b>{cbr}%</b>, min. 6%) — pantau beban berat"))
+        else:
+            issues.append(("🟢", f"Daya dukung <b>baik</b> (CBR <b>{cbr}%</b>, min. 6%) — memenuhi standar konstruksi jalan"))
+
+    if clay is not None:
+        if clay > 40:
+            issues.append(("🔴", f"<b>Clay sangat tinggi</b> ({clay:.1f}%) — risiko retak reflektif dan kembang susut parah"))
+        elif clay > 25:
+            issues.append(("🟠", f"Clay cukup tinggi ({clay:.1f}%) — waspadai <b>retak permukaan</b> saat musim kering"))
+        elif clay < 10 and sand is not None and sand > 60:
+            issues.append(("🟡", f"Pasir dominan ({sand:.1f}%) — risiko <b>erosi dan gerusan</b> di tepi jalan"))
 
     if rain is not None:
         if rain > 3000:
-            v *= 0.75
+            if clay is not None and clay > 30:
+                issues.append(("🔴", f"<b>Curah hujan sangat tinggi</b> ({rain:.0f} mm/thn) + clay tinggi — drainase kritis"))
+            else:
+                issues.append(("🟠", f"<b>Curah hujan tinggi</b> ({rain:.0f} mm/thn) — sistem drainase jalan harus memadai"))
         elif rain > 2000:
-            v *= 0.85
-        elif rain < 1200:
-            v *= 1.10
+            issues.append(("🟡", f"Curah hujan cukup tinggi ({rain:.0f} mm/thn) — perhatikan <b>kemiringan melintang</b> jalan"))
+        elif rain < 300:
+            issues.append(("🟡", f"Curah hujan sangat rendah ({rain:.0f} mm/thn) — waspadai <b>deformasi termal</b> dan retak susut"))
 
-    if s >= 50 and soc is not None and soc < 3:
-        v = max(v, 8)
+    if slope is not None:
+        if slope > 25:
+            issues.append(("🔴", f"<b>Lereng sangat curam</b> ({slope:.1f} deg) — risiko longsor tinggi, retaining wall wajib"))
+        elif slope > 15:
+            issues.append(("🟠", f"Lereng curam ({slope:.1f} deg) — perlu <b>retaining wall</b> dan drainase lereng"))
+        elif slope > 8:
+            issues.append(("🟡", f"Lereng miring ({slope:.1f} deg) — perlu <b>pengendalian erosi</b> permukaan"))
+
+    if bdod is not None:
+        if bdod < 1.0:
+            issues.append(("🔴", f"<b>Kepadatan sangat rendah</b> (kepadatan {bdod:.2f} g/cm3) — tanah gembur, berisiko ambles"))
+        elif bdod < 1.2:
+            issues.append(("🟠", f"Kepadatan rendah (kepadatan {bdod:.2f} g/cm3) — perlu <b>pemadatan</b> sebelum konstruksi"))
+
+    if soc is not None and 5 < soc <= 20:
+        issues.append(("🟠", f"Bahan organik cukup tinggi ( {soc:.1f}%) — <b>tanah tidak stabil</b>, rentan turun perlahan jangka panjang"))
+
+    if not issues:
+        issues.append(("🟢", "<b>Tidak ada masalah signifikan</b> teridentifikasi berdasarkan data tersedia"))
+
+    return issues
+
+# ================= ANALYZE =================
+
+def analyze(lat, lon, chat_id):
+    log.info(f"Analyze start: {lat}, {lon}")
+    tg("⏳ Menganalisis tanah... mohon tunggu sebentar.", chat_id)
+
+    local, region, country, cc = get_location_name(lat, lon)
+    flag_em = flag(cc)
+
+    raw   = get_soil_profile(lat, lon)
+    p     = aggregate(raw)
+    rain  = get_rain(lat, lon)
+    slope = get_slope(lat, lon)
+
+    clay = p["30-60cm"]["clay"]
+    sand = p["30-60cm"]["sand"]
+    silt = p["30-60cm"]["silt"]
+    soc  = p["30-60cm"]["soc"]
+    bd   = p["30-60cm"]["bdod"]
+
+    log.info(f"clay={clay} sand={sand} silt={silt} soc={soc} bd={bd} rain={rain} slope={slope}")
+
+    soil_name, soil_desc     = classify_detail(clay, sand, silt)
+    s_emoji                  = soil_emoji(soil_name)
+    # Cek gambut: pakai nilai tertinggi SOC dari semua lapisan atas (lebih akurat)
+    soc_max = max([v for v in [raw[d]["soc"] for d in ["0-5cm","5-15cm","15-30cm"]] if v is not None], default=None)
+    bd_min  = min([v for v in [raw[d]["bdod"] for d in ["0-5cm","5-15cm","15-30cm"]] if v is not None], default=None)
+    is_peat_flag             = peat(soc_max, bd_min)
+    cbr                      = estimate_cbr(clay, sand, silt, bd, soc, rain)
+    cbr_lbl, cbr_em          = cbr_label(cbr)
+    settle, set_em           = estimate_settlement(cbr, clay, soc)
+    hard                     = hard_layer(bd)
+    slope_lbl, slope_em      = slope_label(slope)
+    rain_lbl, rain_em        = rain_label(rain)
+    ls_risk, ls_em           = landslide_risk(slope, clay, silt, rain, bd)
+    conf_lbl, conf_em, ratio = data_confidence(p, rain, slope)
+
+    loc_line = local
+    if region and region != local:
+        loc_line += f", {region}"
+
+    cbr_txt   = f"{cbr_em} <b>{cbr}%</b>  ({cbr_lbl})" if cbr is not None else "N/A"
+    rain_txt  = f"{rain_em} <b>{rain:.0f} mm/thn</b>  ({rain_lbl})" if rain is not None else "N/A"
+    slope_txt = f"{slope_em} <b>{slope:.1f} deg</b>  ({slope_lbl})"
+
+    issues     = road_issues(cbr, clay, sand, silt, soc, bd, rain, slope, is_peat_flag)
+    issues_txt = "\n".join(f"  {em} {desc}" for em, desc in issues)
+
+    msg = (
+        f"🌍 <b>AI SOIL ANALYSIS REPORT</b> 🌍\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        f"📍 <b>LOKASI</b>\n"
+        f"  {flag_em} <b>{loc_line}</b>\n"
+        f"  {country}\n"
+        f"  🗺 {lat}, {lon}\n\n"
+
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔬 <b>JENIS TANAH DOMINAN</b>\n"
+        f"  {s_emoji} <b>{soil_name}</b>\n"
+        f"  📝 {soil_desc}\n\n"
+
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>PARAMETER UTAMA</b>\n\n"
+        f"  🚧 <b>CBR</b>         : {cbr_txt}\n"
+        f"  🌧 <b>Hujan</b>       : {rain_txt}\n"
+        f"  ⛰ <b>Lereng</b>      : {slope_txt}\n"
+        f"  🧱 <b>Tanah Keras</b> : {hard}\n"
+        f"  {set_em} <b>Penurunan</b>  : {settle}\n"
+        f"  {ls_em} <b>Longsor</b>    : {ls_risk}\n"
+        f"  {'🌿' if is_peat_flag else '✅'} <b>Gambut</b>     : {'⚠️ Terindikasi' if is_peat_flag else 'Tidak terindikasi'}{f' (SOC maks {soc_max:.1f}%)' if soc_max is not None else ''}\n\n"
+
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪨 <b>PROFIL TANAH DETAIL</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+    )
+
+    depth_labels = {
+        "0-30cm":   ("🟫", "Lapisan Atas   (0-30 cm)"),
+        "30-60cm":  ("🟤", "Lapisan Tengah (30-60 cm)"),
+        "60-100cm": ("⬛", "Lapisan Bawah  (60-100 cm)"),
+    }
+
+    for d, data in p.items():
+        em, dlabel = depth_labels.get(d, ("🔲", d))
+        c     = data["clay"] or 0
+        s     = data["sand"] or 0
+        si    = data["silt"] or 0
+        soc_v = data["soc"]  or 0
+        bd_v  = data["bdod"]
+        sn, _ = classify_detail(data["clay"], data["sand"], data["silt"])
+        msg += (
+            f"\n{em} <b>{dlabel}</b>\n"
+            f"  Jenis   : <b>{sn}</b>\n"
+            f"  🟫 Clay  : <b>{c:.1f}%</b>  {bar(c)}\n"
+            f"  🟡 Sand  : <b>{s:.1f}%</b>  {bar(s)}\n"
+            f"  🔘 Silt  : <b>{si:.1f}%</b>  {bar(si)}\n"
+            f"  🌱 Bhn Organik : <b>{soc_v:.2f}%</b>\n"
+            f"  🪨 Kepadatan   : <b>{fmt(bd_v, 2, ' g/cm3', '0.00')}</b>\n"
+        )
+
+    msg += (
+        f"\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ <b>ANALISIS POTENSI MASALAH JALAN</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{issues_txt}\n\n"
+
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📡 <b>TINGKAT KEPERCAYAAN DATA</b>\n"
+        f"  {conf_em} <b>{conf_lbl}</b>\n"
+        f"  Data tersedia: <b>{ratio*100:.0f}%</b> dari total parameter\n"
+        f"  Sumber: SoilGrids ISRIC v2 + CHIRPS + SRTM\n\n"
+
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🤖 <i>Preliminary assessment via SoilGrids ISRIC + GEE.\n"
+        f"Wajib verifikasi investigasi lapangan.</i>"
+    )
+
+    tg(msg, chat_id)
+    log.info("Analyze done")
+
+# ================= LOOP =================
+
+def loop():
+    global last_update_id
+    while True:
+        try:
+            r = requests.get(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={last_update_id + 1}",
+                timeout=20
+            ).json()
+            for u in r.get("result", []):
+                last_update_id = u["update_id"]
+                msg = u.get("message")
+                if not msg or "text" not in msg:
+                    continue
+                text = msg["text"]
+                chat = str(msg["chat"]["id"])
+                log.info(f"Received: '{text}' from {chat}")
+                coord = re.search(r"(-?\d+\.?\d*)[, ]+(-?\d+\.?\d*)", text)
+                if coord:
+                    analyze(float(coord.group(1)), float(coord.group(2)), chat)
+        except Exception as e:
+            log.error(f"Loop error: {e}")
+        time.sleep(2)
+
+# ================= MAIN =================
+
 def main():
     try:
         requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook", timeout=10)
@@ -223,9 +496,7 @@ def main():
     except Exception as e:
         log.error(f"deleteWebhook error: {e}")
     log.info("Bot running")
-    tg("Bot Soil AI siap digunakan!", ADMIN_ID)
+    tg("🤖 Soil AI siap digunakan!", ADMIN_ID)
     loop()
 
-if __name__ == "__main__":
-    main()
-    return round(v, 1)
+main()
