@@ -32,16 +32,36 @@ def tg(msg, chat_id):
             json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"},
             timeout=15
         )
-        log.info(f"TG send status: {r.status_code} | {r.text[:100]}")
+        log.info(f"TG send status: {r.status_code}")
     except Exception as e:
         log.error(f"Telegram error: {e}")
+
+# ================= DEBUG BAND NAMES =================
+def debug_bands():
+    """Cek band names yang tersedia di SoilGrids"""
+    try:
+        bands = ee.Image("projects/soilgrids-isric/clay_mean").bandNames().getInfo()
+        log.info(f"SoilGrids clay bands: {bands}")
+        return bands
+    except Exception as e:
+        log.error(f"debug_bands error: {e}")
+        return []
 
 # ================= SOIL =================
 def get_soil_profile(lat, lon):
 
     point = ee.Geometry.Point([lon, lat])
 
-    depths = ["0-5cm", "5-15cm", "15-30cm", "30-60cm", "60-100cm"]
+    # Band names SoilGrids ISRIC yang benar
+    # Format: {prop}_{depth}_mean  tapi depth pakai format berbeda
+    # Cek dulu dari debug_bands()
+    depth_map = {
+        "0-5cm":   "0_5",
+        "5-15cm":  "5_15",
+        "15-30cm": "15_30",
+        "30-60cm": "30_60",
+        "60-100cm":"60_100"
+    }
 
     datasets = {
         "clay": "projects/soilgrids-isric/clay_mean",
@@ -53,21 +73,33 @@ def get_soil_profile(lat, lon):
 
     profile = {}
 
-    for d in depths:
+    for d, d_code in depth_map.items():
         profile[d] = {}
         for prop, ds in datasets.items():
-            band = f"{prop}_{d}_mean"
-            try:
-                val = ee.Image(ds).select(band).reduceRegion(
-                    reducer=ee.Reducer.mean(),
-                    geometry=point,
-                    scale=250,
-                    bestEffort=True
-                ).get(band)
-                val = ee.Number(val).getInfo() if val is not None else None
-            except Exception as e:
-                log.error(f"GEE soil error [{prop}][{d}]: {e}")
-                val = None
+            # Coba dua format band name yang umum di SoilGrids
+            band_candidates = [
+                f"{prop}_{d}_mean",          # clay_0-5cm_mean
+                f"{prop}_{d_code}cm_mean",   # clay_0_5cm_mean  
+                f"{prop}_{d_code}_mean",     # clay_0_5_mean
+                f"b{d_code}",               # b0_5
+            ]
+            val = None
+            for band in band_candidates:
+                try:
+                    result = ee.Image(ds).select(band).reduceRegion(
+                        reducer=ee.Reducer.mean(),
+                        geometry=point,
+                        scale=250,
+                        bestEffort=True
+                    ).get(band)
+                    v = ee.Number(result).getInfo() if result is not None else None
+                    if v is not None:
+                        val = v
+                        if d == "0-5cm" and prop == "clay":
+                            log.info(f"Working band format: '{band}'")
+                        break
+                except:
+                    continue
 
             if val is not None:
                 if prop in ["clay", "sand", "silt"]:
@@ -77,7 +109,7 @@ def get_soil_profile(lat, lon):
 
             profile[d][prop] = val
 
-    log.info(f"Soil profile sample 30-60cm: {profile.get('30-60cm')}")
+    log.info(f"Soil 30-60cm: {profile.get('30-60cm')}")
     return profile
 
 # ================= AGGREGATE =================
@@ -173,7 +205,6 @@ def estimate_cbr(c, s, si, bdod, soc, rain):
         v *= 0.85
     return round(v, 1)
 
-# ================= SETTLEMENT =================
 def estimate_settlement(cbr, clay, soc):
     if soc is not None and soc > 20:
         return "Sangat besar (>10 cm)"
@@ -209,15 +240,13 @@ def analyze(lat, lon, chat_id):
     rain = get_rain(lat, lon)
     slope = get_slope(lat, lon)
 
-    log.info(f"rain={rain} slope={slope}")
-
     clay = p["30-60cm"]["clay"]
     sand = p["30-60cm"]["sand"]
     silt = p["30-60cm"]["silt"]
     soc  = p["30-60cm"]["soc"]
     bd   = p["30-60cm"]["bdod"]
 
-    log.info(f"clay={clay} sand={sand} silt={silt} soc={soc} bd={bd}")
+    log.info(f"clay={clay} sand={sand} silt={silt} soc={soc} bd={bd} rain={rain} slope={slope}")
 
     soil = classify(clay, sand, silt)
     is_peat = peat(raw["0-5cm"]["soc"], raw["0-5cm"]["bdod"])
@@ -295,49 +324,40 @@ Wajib verifikasi investigasi tanah lapangan.
 # ================= LOOP =================
 
 def loop():
-
     global last_update_id
-
     while True:
         try:
             r = requests.get(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={last_update_id + 1}",
                 timeout=20
             ).json()
-
             for u in r.get("result", []):
                 last_update_id = u["update_id"]
-
                 msg = u.get("message")
                 if not msg or "text" not in msg:
                     continue
-
                 text = msg["text"]
                 chat = str(msg["chat"]["id"])
                 log.info(f"Received: '{text}' from {chat}")
-
                 coord = re.search(r"(-?\d+\.?\d*)[, ]+(-?\d+\.?\d*)", text)
                 if coord:
                     analyze(float(coord.group(1)), float(coord.group(2)), chat)
-                else:
-                    log.info("No coordinates found in message")
-
         except Exception as e:
             log.error(f"Loop error: {e}")
-
         time.sleep(2)
 
 # ================= MAIN =================
 
 def main():
     try:
-        requests.get(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook",
-            timeout=10
-        )
+        requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook", timeout=10)
         log.info("Webhook deleted")
     except Exception as e:
         log.error(f"deleteWebhook error: {e}")
+
+    # Cek band names SoilGrids saat startup
+    debug_bands()
+
     log.info("Bot running")
     tg("🤖 Soil AI siap digunakan", ADMIN_ID)
     loop()
