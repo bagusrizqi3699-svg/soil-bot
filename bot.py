@@ -6,8 +6,8 @@ import logging
 import time
 import re
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-ADMIN_ID = os.environ.get("ADMIN_ID", "")
+TELEGRAM_TOKEN = "8385287062:AAGgwYA0l7-Cuq4jA7dgcy5GkFAvDp7X1GM"
+ADMIN_ID = "1145085024"
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -167,7 +167,6 @@ def peat(soc, bdod):
 
 def estimate_cbr(c, s, si, bdod, soc, rain):
 
-    # FIX: cek None sebelum operasi aritmatika
     if c is None or s is None or si is None:
         return None
 
@@ -256,7 +255,6 @@ def analyze(lat, lon, chat_id):
 
     hard = hard_layer(bd)
 
-    # FIX: format aman untuk nilai yang bisa None
     cbr_txt   = f"{cbr}%" if cbr is not None else "N/A"
     rain_txt  = f"{rain:.0f} mm/tahun" if rain is not None else "N/A"
     slope_txt = f"{slope:.1f}°" if slope is not None else "N/A"
@@ -345,7 +343,6 @@ def loop():
 
                 last_update_id = u["update_id"]
 
-                # FIX: skip update yang bukan pesan teks biasa
                 msg = u.get("message")
                 if not msg or "text" not in msg:
                     continue
@@ -366,6 +363,14 @@ def loop():
 # ================= MAIN =================
 
 def main():
+    # Hapus webhook lama biar getUpdates bisa jalan
+    try:
+        requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook",
+            timeout=10
+        )
+    except:
+        pass
     log.info("Bot running")
     tg("🤖 Soil AI siap digunakan", ADMIN_ID)
     loop()
