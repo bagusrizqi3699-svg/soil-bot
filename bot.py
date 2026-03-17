@@ -27,13 +27,14 @@ ee.Initialize(credentials)
 # ================= TELEGRAM =================
 def tg(msg, chat_id):
     try:
-        requests.post(
+        r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"},
             timeout=15
         )
-    except:
-        log.error("Telegram error")
+        log.info(f"TG send status: {r.status_code} | {r.text[:100]}")
+    except Exception as e:
+        log.error(f"Telegram error: {e}")
 
 # ================= SOIL =================
 def get_soil_profile(lat, lon):
@@ -53,13 +54,9 @@ def get_soil_profile(lat, lon):
     profile = {}
 
     for d in depths:
-
         profile[d] = {}
-
         for prop, ds in datasets.items():
-
             band = f"{prop}_{d}_mean"
-
             try:
                 val = ee.Image(ds).select(band).reduceRegion(
                     reducer=ee.Reducer.mean(),
@@ -67,13 +64,11 @@ def get_soil_profile(lat, lon):
                     scale=250,
                     bestEffort=True
                 ).get(band)
-
                 val = ee.Number(val).getInfo() if val is not None else None
-
-            except:
+            except Exception as e:
+                log.error(f"GEE soil error [{prop}][{d}]: {e}")
                 val = None
 
-            # scaling
             if val is not None:
                 if prop in ["clay", "sand", "silt"]:
                     val = val / 10
@@ -82,6 +77,7 @@ def get_soil_profile(lat, lon):
 
             profile[d][prop] = val
 
+    log.info(f"Soil profile sample 30-60cm: {profile.get('30-60cm')}")
     return profile
 
 # ================= AGGREGATE =================
@@ -105,57 +101,45 @@ def aggregate(p):
 
 # ================= TERRAIN =================
 def get_slope(lat, lon):
-
     point = ee.Geometry.Point([lon, lat])
-
     try:
         slope = ee.Terrain.slope(ee.Image("USGS/SRTMGL1_003"))
-
         val = slope.reduceRegion(
             reducer=ee.Reducer.mean(),
             geometry=point,
             scale=30
         ).get("slope")
-
         if val is None:
             return 0.0
-
         return ee.Number(val).getInfo()
-
-    except:
+    except Exception as e:
+        log.error(f"GEE slope error: {e}")
         return 0.0
 
 # ================= RAIN =================
 def get_rain(lat, lon):
-
     point = ee.Geometry.Point([lon, lat])
-
     try:
         rain = ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY") \
             .filterDate("2015-01-01", "2024-01-01") \
             .sum()
-
         val = rain.reduceRegion(
             reducer=ee.Reducer.mean(),
             geometry=point,
             scale=5000
         ).get("precipitation")
-
         if val is None:
             return None
-
         return ee.Number(val).getInfo() / 9
-
-    except:
+    except Exception as e:
+        log.error(f"GEE rain error: {e}")
         return None
 
 # ================= MODEL =================
 
 def classify(c, s, si):
-
     if c is None or s is None or si is None:
         return "N/A"
-
     if c >= s and c >= si:
         return "Lempung"
     if si >= c and si >= s:
@@ -166,13 +150,10 @@ def peat(soc, bdod):
     return soc is not None and soc > 20 and bdod is not None and bdod < 1.2
 
 def estimate_cbr(c, s, si, bdod, soc, rain):
-
     if c is None or s is None or si is None:
         return None
-
     if soc is not None and soc > 20:
         return 1.5
-
     if c > 45:
         v = 3
     elif c > 35:
@@ -183,54 +164,43 @@ def estimate_cbr(c, s, si, bdod, soc, rain):
         v = 15
     else:
         v = 8
-
     if bdod:
         if bdod > 1.35:
             v *= 1.3
         elif bdod < 1.1:
             v *= 0.7
-
     if rain is not None and rain > 2500:
         v *= 0.85
-
     return round(v, 1)
 
 # ================= SETTLEMENT =================
 def estimate_settlement(cbr, clay, soc):
-
     if soc is not None and soc > 20:
         return "Sangat besar (>10 cm)"
-
     if cbr is None:
         return "N/A"
-
     if cbr < 3:
         return "Besar (5–10 cm)"
-
     if cbr < 6:
         return "Sedang (2–5 cm)"
-
     if clay is not None and clay > 40:
         return "Sedang (2–5 cm)"
-
     return "Kecil (<2 cm)"
 
 def hard_layer(bd):
-
     if bd is None:
         return "N/A"
-
     if bd >= 1.45: return "±0.8 m"
     if bd >= 1.38: return "±1.0 m"
     if bd >= 1.32: return "±1.3 m"
     if bd >= 1.28: return "±1.6 m"
-
     return ">2 m"
 
 # ================= ANALYZE =================
 
 def analyze(lat, lon, chat_id):
 
+    log.info(f"Analyze start: {lat}, {lon}")
     tg("⏳ Analisis tanah...", chat_id)
 
     raw = get_soil_profile(lat, lon)
@@ -239,20 +209,20 @@ def analyze(lat, lon, chat_id):
     rain = get_rain(lat, lon)
     slope = get_slope(lat, lon)
 
+    log.info(f"rain={rain} slope={slope}")
+
     clay = p["30-60cm"]["clay"]
     sand = p["30-60cm"]["sand"]
     silt = p["30-60cm"]["silt"]
     soc  = p["30-60cm"]["soc"]
     bd   = p["30-60cm"]["bdod"]
 
+    log.info(f"clay={clay} sand={sand} silt={silt} soc={soc} bd={bd}")
+
     soil = classify(clay, sand, silt)
-
     is_peat = peat(raw["0-5cm"]["soc"], raw["0-5cm"]["bdod"])
-
     cbr = estimate_cbr(clay, sand, silt, bd, soc, rain)
-
     settlement = estimate_settlement(cbr, clay, soc)
-
     hard = hard_layer(bd)
 
     cbr_txt   = f"{cbr}%" if cbr is not None else "N/A"
@@ -293,11 +263,9 @@ def analyze(lat, lon, chat_id):
 """
 
     for d, data in p.items():
-
         clay_txt = f"{data['clay']:.1f}%" if data["clay"] is not None else "N/A"
         sand_txt = f"{data['sand']:.1f}%" if data["sand"] is not None else "N/A"
         silt_txt = f"{data['silt']:.1f}%" if data["silt"] is not None else "N/A"
-
         msg += f"""
 {d}
 Jenis tanah : {classify(data["clay"], data["sand"], data["silt"])}
@@ -307,7 +275,6 @@ Silt {silt_txt}
 """
 
     msg += f"""
-
 ━━━━━━━━━━━━
 ⚠ <b>DAMPAK TERHADAP PERKERASAN</b>
 
@@ -323,6 +290,7 @@ Wajib verifikasi investigasi tanah lapangan.
 """
 
     tg(msg, chat_id)
+    log.info("Analyze done")
 
 # ================= LOOP =================
 
@@ -331,16 +299,13 @@ def loop():
     global last_update_id
 
     while True:
-
         try:
-
             r = requests.get(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={last_update_id + 1}",
                 timeout=20
             ).json()
 
             for u in r.get("result", []):
-
                 last_update_id = u["update_id"]
 
                 msg = u.get("message")
@@ -349,28 +314,30 @@ def loop():
 
                 text = msg["text"]
                 chat = str(msg["chat"]["id"])
+                log.info(f"Received: '{text}' from {chat}")
 
                 coord = re.search(r"(-?\d+\.?\d*)[, ]+(-?\d+\.?\d*)", text)
-
                 if coord:
                     analyze(float(coord.group(1)), float(coord.group(2)), chat)
+                else:
+                    log.info("No coordinates found in message")
 
         except Exception as e:
-            log.error(e)
+            log.error(f"Loop error: {e}")
 
         time.sleep(2)
 
 # ================= MAIN =================
 
 def main():
-    # Hapus webhook lama biar getUpdates bisa jalan
     try:
         requests.get(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook",
             timeout=10
         )
-    except:
-        pass
+        log.info("Webhook deleted")
+    except Exception as e:
+        log.error(f"deleteWebhook error: {e}")
     log.info("Bot running")
     tg("🤖 Soil AI siap digunakan", ADMIN_ID)
     loop()
