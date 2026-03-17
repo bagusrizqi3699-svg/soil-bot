@@ -93,22 +93,47 @@ def get_soil_profile(lat, lon):
         for prop, ds in datasets.items():
             try:
                 band_name = f"{prop}_{suffix}"
-                img = ee.Image(ds).select(band_name)
+
+                # FIX: select + unmask (handle masked pixels)
+                img = ee.Image(ds).select([band_name]).unmask(-9999)
+
+                # FIX: buffer sampling (hindari pixel kosong)
                 result = img.reduceRegion(
                     reducer=ee.Reducer.mean(),
-                    geometry=point,
+                    geometry=point.buffer(300),
                     scale=250,
-                    bestEffort=True
+                    bestEffort=True,
+                    maxPixels=1e13
                 )
+
                 result_dict = result.getInfo()
+
+                # FIX: fallback kalau kosong
+                if not result_dict:
+                    result = img.reduceRegion(
+                        reducer=ee.Reducer.mean(),
+                        geometry=point.buffer(1000),
+                        scale=250,
+                        bestEffort=True,
+                        maxPixels=1e13
+                    )
+                    result_dict = result.getInfo()
+
                 val = list(result_dict.values())[0] if result_dict else None
+
+                # FIX: handle masked value
+                if val == -9999:
+                    val = None
+
             except Exception as e:
                 log.error(f"GEE error [{prop}][{d}]: {e}")
                 val = None
 
             if val is not None:
-                if prop in ["clay","sand","silt"]: val = val / 10
-                elif prop in ["bdod","soc"]:       val = val / 100
+                if prop in ["clay","sand","silt"]:
+                    val = val / 10
+                elif prop in ["bdod","soc"]:
+                    val = val / 100
 
             profile[d][prop] = val
 
@@ -158,7 +183,6 @@ def get_rain(lat, lon):
         return None
 
 # ================= CLASSIFICATION =================
-
 def classify_detail(c, s, si):
     if c is None or s is None or si is None:
         return "N/A", "Data tidak tersedia"
@@ -166,30 +190,34 @@ def classify_detail(c, s, si):
     if total == 0:
         return "N/A", "Data tidak valid"
     if c >= 40:
-        if s > 20:  return "Lempung Berpasir",       "Dominan lempung dengan campuran pasir cukup signifikan"
-        if si > 20: return "Lempung Berlanau",        "Dominan lempung dengan campuran lanau"
-        return          "Lempung Murni",               "Sangat dominan lempung, plastisitas tinggi"
+        if s > 20:  return "Lempung Berpasir", "Dominan lempung dengan campuran pasir cukup signifikan"
+        if si > 20: return "Lempung Berlanau", "Dominan lempung dengan campuran lanau"
+        return "Lempung Murni", "Sangat dominan lempung, plastisitas tinggi"
     if s >= 60:
-        if c > 10:  return "Pasir Berlempung",        "Dominan pasir dengan campuran lempung"
-        if si > 15: return "Pasir Berlanau",           "Dominan pasir dengan campuran lanau"
-        return          "Pasir Murni",                 "Sangat dominan pasir, drainase sangat tinggi"
+        if c > 10:  return "Pasir Berlempung", "Dominan pasir dengan campuran lempung"
+        if si > 15: return "Pasir Berlanau", "Dominan pasir dengan campuran lanau"
+        return "Pasir Murni", "Sangat dominan pasir, drainase sangat tinggi"
     if si >= 40:
-        if c > 20:  return "Lanau Berlempung",        "Dominan lanau dengan campuran lempung"
-        if s > 20:  return "Lanau Berpasir",           "Dominan lanau dengan campuran pasir"
-        return          "Lanau Murni",                 "Sangat dominan lanau, rentan erosi"
+        if c > 20:  return "Lanau Berlempung", "Dominan lanau dengan campuran lempung"
+        if s > 20:  return "Lanau Berpasir", "Dominan lanau dengan campuran pasir"
+        return "Lanau Murni", "Sangat dominan lanau, rentan erosi"
     if c > 25 and s > 25 and si > 25:
-        return          "Lempung Campuran (Loam)",     "Campuran seimbang — ideal untuk konstruksi"
-    if c > s and c > si: return "Lempung Campuran",   "Lempung dominan dengan campuran pasir dan lanau"
-    if s > si:           return "Pasir Campuran",     "Pasir dominan dengan campuran lempung dan lanau"
-    return                      "Lanau Campuran",     "Lanau dominan dengan campuran lempung dan pasir"
+        return "Lempung Campuran (Loam)", "Campuran seimbang — ideal untuk konstruksi"
+    if c > s and c > si:
+        return "Lempung Campuran", "Lempung dominan dengan campuran pasir dan lanau"
+    if s > si:
+        return "Pasir Campuran", "Pasir dominan dengan campuran lempung dan lanau"
+    return "Lanau Campuran", "Lanau dominan dengan campuran lempung dan pasir"
 
 def soil_emoji(name):
     for k, v in {"Lempung":"🟫","Lanau":"🟤","Pasir":"🟡","Loam":"🟢"}.items():
-        if k in name: return v
+        if k in name:
+            return v
     return "⬜"
 
 def bar(val, max_val=100, length=10):
-    if val is None: return "░" * length
+    if val is None:
+        return "░" * length
     filled = max(0, min(length, round((val / max_val) * length)))
     return "█" * filled + "░" * (length - filled)
 
@@ -197,8 +225,10 @@ def peat(soc, bdod):
     return soc is not None and soc > 20 and bdod is not None and bdod < 1.2
 
 def estimate_cbr(c, s, si, bdod, soc, rain):
-    if c is None or s is None or si is None: return None
-    if soc is not None and soc > 20: return 1.5
+    if c is None or s is None or si is None:
+        return None
+    if soc is not None and soc > 20:
+        return 1.5
     if c > 45:   v = 3
     elif c > 35: v = 4
     elif c > 25: v = 6
@@ -207,7 +237,8 @@ def estimate_cbr(c, s, si, bdod, soc, rain):
     if bdod:
         if bdod > 1.35:  v *= 1.3
         elif bdod < 1.1: v *= 0.7
-    if rain is not None and rain > 2500: v *= 0.85
+    if rain is not None and rain > 2500:
+        v *= 0.85
     return round(v, 1)
 
 def cbr_label(cbr):
@@ -216,15 +247,20 @@ def cbr_label(cbr):
     if cbr < 6:      return "Lemah", "🟠"
     if cbr < 10:     return "Sedang", "🟡"
     if cbr < 20:     return "Baik", "🟢"
-    return                  "Sangat Baik", "🔵"
+    return "Sangat Baik", "🔵"
 
 def estimate_settlement(cbr, clay, soc):
-    if soc is not None and soc > 20: return "Sangat Besar (di atas 10 cm)", "🔴"
-    if cbr is None:                  return "N/A", "⬜"
-    if cbr < 3:                      return "Besar (5-10 cm)", "🟠"
-    if cbr < 6:                      return "Sedang (2-5 cm)", "🟡"
-    if clay is not None and clay > 40: return "Sedang (2-5 cm)", "🟡"
-    return                               "Kecil (di bawah 2 cm)", "🟢"
+    if soc is not None and soc > 20:
+        return "Sangat Besar (di atas 10 cm)", "🔴"
+    if cbr is None:
+        return "N/A", "⬜"
+    if cbr < 3:
+        return "Besar (5-10 cm)", "🟠"
+    if cbr < 6:
+        return "Sedang (2-5 cm)", "🟡"
+    if clay is not None and clay > 40:
+        return "Sedang (2-5 cm)", "🟡"
+    return "Kecil (di bawah 2 cm)", "🟢"
 
 def hard_layer(bd):
     if bd is None:  return "N/A"
@@ -232,14 +268,14 @@ def hard_layer(bd):
     if bd >= 1.38:  return "+-1.0 m"
     if bd >= 1.32:  return "+-1.3 m"
     if bd >= 1.28:  return "+-1.6 m"
-    return                 "lebih dari 2 m"
+    return "lebih dari 2 m"
 
 def slope_label(s):
     if s < 2:  return "Datar", "🟢"
     if s < 8:  return "Landai", "🟡"
     if s < 15: return "Miring", "🟠"
     if s < 30: return "Curam", "🔴"
-    return           "Sangat Curam", "🔴"
+    return "Sangat Curam", "🔴"
 
 def rain_label(r):
     if r is None: return "N/A", "⬜"
@@ -247,7 +283,7 @@ def rain_label(r):
     if r < 1500:  return "Kering", "🟠"
     if r < 2500:  return "Normal", "🟢"
     if r < 4000:  return "Basah", "🔵"
-    return              "Sangat Basah", "🌊"
+    return "Sangat Basah", "🌊"
 
 def landslide_risk(slope, clay, silt, rain, bdod):
     if slope is None:
@@ -267,7 +303,7 @@ def landslide_risk(slope, clay, silt, rain, bdod):
     if score >= 5:   return "Tinggi", "🟠"
     if score >= 3:   return "Sedang", "🟡"
     if score >= 1:   return "Rendah", "🟢"
-    return                  "Sangat Rendah", "🔵"
+    return "Sangat Rendah", "🔵"
 
 def data_confidence(p, rain, slope):
     total  = 0
@@ -275,10 +311,13 @@ def data_confidence(p, rain, slope):
     for d, data in p.items():
         for v in data.values():
             total += 1
-            if v is not None: filled += 1
-    if rain  is not None: filled += 1
+            if v is not None:
+                filled += 1
+    if rain is not None:
+        filled += 1
     total += 1
-    if slope is not None and slope > 0: filled += 1
+    if slope is not None and slope > 0:
+        filled += 1
     total += 1
 
     ratio = filled / total if total > 0 else 0
@@ -286,10 +325,11 @@ def data_confidence(p, rain, slope):
     if ratio >= 0.90: return "Tinggi (di atas 90% data tersedia)", "🟢", ratio
     if ratio >= 0.70: return "Sedang (70-90% data tersedia)", "🟡", ratio
     if ratio >= 0.40: return "Rendah (40-70% data tersedia)", "🟠", ratio
-    return                   "Sangat Rendah (kurang dari 40% data tersedia)", "🔴", ratio
+    return "Sangat Rendah (kurang dari 40% data tersedia)", "🔴", ratio
 
 def fmt(val, dec=2, unit="", fallback="0"):
-    if val is None: return fallback + unit
+    if val is None:
+        return fallback + unit
     return f"{val:.{dec}f}{unit}"
 
 # ================= DYNAMIC ROAD ISSUES =================
@@ -353,7 +393,6 @@ def road_issues(cbr, clay, sand, silt, soc, bdod, rain, slope, is_peat_flag):
     return issues
 
 # ================= ANALYZE =================
-
 def analyze(lat, lon, chat_id):
     log.info(f"Analyze start: {lat}, {lon}")
     tg("⏳ Menganalisis tanah... mohon tunggu sebentar.", chat_id)
@@ -474,7 +513,6 @@ def analyze(lat, lon, chat_id):
     log.info("Analyze done")
 
 # ================= LOOP =================
-
 def loop():
     global last_update_id
     while True:
@@ -499,7 +537,6 @@ def loop():
         time.sleep(2)
 
 # ================= MAIN =================
-
 def main():
     try:
         requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook", timeout=10)
