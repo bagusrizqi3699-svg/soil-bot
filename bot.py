@@ -194,7 +194,7 @@ def estimate_settlement(cbr, clay, soc):
         return "Sedang (2-5 cm)"
     if clay is not None and clay > 40:
         return "Sedang (2-5 cm)"
-    return "Kecil (<2 cm)"
+    return "Kecil (di bawah 2 cm)"
 
 def hard_layer(bd):
     if bd is None:
