@@ -70,7 +70,15 @@ def flag(cc):
 # ================= SOIL =================
 def get_soil_profile(lat, lon):
     point = ee.Geometry.Point([lon, lat])
-    depth_index = {"0-5cm":0,"5-15cm":1,"15-30cm":2,"30-60cm":3,"60-100cm":4}
+
+    band_map = {
+        "0-5cm":   "0-5cm_mean",
+        "5-15cm":  "5-15cm_mean",
+        "15-30cm": "15-30cm_mean",
+        "30-60cm": "30-60cm_mean",
+        "60-100cm":"60-100cm_mean"
+    }
+
     datasets = {
         "clay":"projects/soilgrids-isric/clay_mean",
         "sand":"projects/soilgrids-isric/sand_mean",
@@ -78,24 +86,32 @@ def get_soil_profile(lat, lon):
         "bdod":"projects/soilgrids-isric/bdod_mean",
         "soc": "projects/soilgrids-isric/soc_mean"
     }
+
     profile = {}
-    for d, idx in depth_index.items():
+    for d, suffix in band_map.items():
         profile[d] = {}
         for prop, ds in datasets.items():
             try:
-                img = ee.Image(ds).select(idx)
+                band_name = f"{prop}_{suffix}"
+                img = ee.Image(ds).select(band_name)
                 result = img.reduceRegion(
-                    reducer=ee.Reducer.mean(), geometry=point, scale=250, bestEffort=True
+                    reducer=ee.Reducer.mean(),
+                    geometry=point,
+                    scale=250,
+                    bestEffort=True
                 )
-                keys = result.keys().getInfo()
-                val  = ee.Number(result.get(keys[0])).getInfo() if keys else None
+                result_dict = result.getInfo()
+                val = list(result_dict.values())[0] if result_dict else None
             except Exception as e:
                 log.error(f"GEE error [{prop}][{d}]: {e}")
                 val = None
+
             if val is not None:
                 if prop in ["clay","sand","silt"]: val = val / 10
                 elif prop in ["bdod","soc"]:       val = val / 100
+
             profile[d][prop] = val
+
     log.info(f"Soil 30-60cm: {profile.get('30-60cm')}")
     return profile
 
@@ -234,7 +250,6 @@ def rain_label(r):
     return              "Sangat Basah", "🌊"
 
 def landslide_risk(slope, clay, silt, rain, bdod):
-    """Estimasi potensi longsor berdasarkan lereng, tanah, dan hujan"""
     if slope is None:
         return "N/A", "⬜"
     score = 0
@@ -255,10 +270,6 @@ def landslide_risk(slope, clay, silt, rain, bdod):
     return                  "Sangat Rendah", "🔵"
 
 def data_confidence(p, rain, slope):
-    """
-    Hitung tingkat kepercayaan data berdasarkan kelengkapan nilai GEE.
-    Semakin banyak None, semakin rendah kepercayaan.
-    """
     total  = 0
     filled = 0
     for d, data in p.items():
@@ -365,7 +376,6 @@ def analyze(lat, lon, chat_id):
 
     soil_name, soil_desc     = classify_detail(clay, sand, silt)
     s_emoji                  = soil_emoji(soil_name)
-    # Cek gambut: pakai nilai tertinggi SOC dari semua lapisan atas (lebih akurat)
     soc_max = max([v for v in [raw[d]["soc"] for d in ["0-5cm","5-15cm","15-30cm"]] if v is not None], default=None)
     bd_min  = min([v for v in [raw[d]["bdod"] for d in ["0-5cm","5-15cm","15-30cm"]] if v is not None], default=None)
     is_peat_flag             = peat(soc_max, bd_min)
@@ -426,19 +436,20 @@ def analyze(lat, lon, chat_id):
 
     for d, data in p.items():
         em, dlabel = depth_labels.get(d, ("🔲", d))
-        c     = data["clay"] or 0
-        s     = data["sand"] or 0
-        si    = data["silt"] or 0
-        soc_v = data["soc"]  or 0
+        c     = data["clay"]
+        s     = data["sand"]
+        si    = data["silt"]
+        soc_v = data["soc"]
         bd_v  = data["bdod"]
         sn, _ = classify_detail(data["clay"], data["sand"], data["silt"])
+
         msg += (
             f"\n{em} <b>{dlabel}</b>\n"
             f"  Jenis   : <b>{sn}</b>\n"
-            f"  🟫 Clay  : <b>{c:.1f}%</b>  {bar(c)}\n"
-            f"  🟡 Sand  : <b>{s:.1f}%</b>  {bar(s)}\n"
-            f"  🔘 Silt  : <b>{si:.1f}%</b>  {bar(si)}\n"
-            f"  🌱 Bhn Organik : <b>{soc_v:.2f}%</b>\n"
+            f"  🟫 Clay  : <b>{fmt(c,1,'%')}</b>  {bar(c if c is not None else 0)}\n"
+            f"  🟡 Sand  : <b>{fmt(s,1,'%')}</b>  {bar(s if s is not None else 0)}\n"
+            f"  🔘 Silt  : <b>{fmt(si,1,'%')}</b>  {bar(si if si is not None else 0)}\n"
+            f"  🌱 Bhn Organik : <b>{fmt(soc_v,2,'%','0.00')}</b>\n"
             f"  🪨 Kepadatan   : <b>{fmt(bd_v, 2, ' g/cm3', '0.00')}</b>\n"
         )
 
