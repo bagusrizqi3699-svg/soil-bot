@@ -36,31 +36,18 @@ def tg(msg, chat_id):
     except Exception as e:
         log.error(f"Telegram error: {e}")
 
-# ================= DEBUG BAND NAMES =================
-def debug_bands():
-    """Cek band names yang tersedia di SoilGrids"""
-    try:
-        bands = ee.Image("projects/soilgrids-isric/clay_mean").bandNames().getInfo()
-        log.info(f"SoilGrids clay bands: {bands}")
-        return bands
-    except Exception as e:
-        log.error(f"debug_bands error: {e}")
-        return []
-
 # ================= SOIL =================
 def get_soil_profile(lat, lon):
 
     point = ee.Geometry.Point([lon, lat])
 
-    # Band names SoilGrids ISRIC yang benar
-    # Format: {prop}_{depth}_mean  tapi depth pakai format berbeda
-    # Cek dulu dari debug_bands()
-    depth_map = {
-        "0-5cm":   "0_5",
-        "5-15cm":  "5_15",
-        "15-30cm": "15_30",
-        "30-60cm": "30_60",
-        "60-100cm":"60_100"
+    # Index band per depth (urutan: 0-5, 5-15, 15-30, 30-60, 60-100, 100-200)
+    depth_index = {
+        "0-5cm":    0,
+        "5-15cm":   1,
+        "15-30cm":  2,
+        "30-60cm":  3,
+        "60-100cm": 4,
     }
 
     datasets = {
@@ -73,33 +60,24 @@ def get_soil_profile(lat, lon):
 
     profile = {}
 
-    for d, d_code in depth_map.items():
+    for d, idx in depth_index.items():
         profile[d] = {}
         for prop, ds in datasets.items():
-            # Coba dua format band name yang umum di SoilGrids
-            band_candidates = [
-                f"{prop}_{d}_mean",          # clay_0-5cm_mean
-                f"{prop}_{d_code}cm_mean",   # clay_0_5cm_mean  
-                f"{prop}_{d_code}_mean",     # clay_0_5_mean
-                f"b{d_code}",               # b0_5
-            ]
-            val = None
-            for band in band_candidates:
-                try:
-                    result = ee.Image(ds).select(band).reduceRegion(
-                        reducer=ee.Reducer.mean(),
-                        geometry=point,
-                        scale=250,
-                        bestEffort=True
-                    ).get(band)
-                    v = ee.Number(result).getInfo() if result is not None else None
-                    if v is not None:
-                        val = v
-                        if d == "0-5cm" and prop == "clay":
-                            log.info(f"Working band format: '{band}'")
-                        break
-                except:
-                    continue
+            try:
+                # Pakai index band bukan nama — hindari masalah karakter '-'
+                img = ee.Image(ds).select(idx)
+                result = img.reduceRegion(
+                    reducer=ee.Reducer.mean(),
+                    geometry=point,
+                    scale=250,
+                    bestEffort=True
+                )
+                # Ambil nilai dari key pertama (nama band apapun)
+                keys = result.keys().getInfo()
+                val = ee.Number(result.get(keys[0])).getInfo() if keys else None
+            except Exception as e:
+                log.error(f"GEE error [{prop}][{d}]: {e}")
+                val = None
 
             if val is not None:
                 if prop in ["clay", "sand", "silt"]:
@@ -354,10 +332,6 @@ def main():
         log.info("Webhook deleted")
     except Exception as e:
         log.error(f"deleteWebhook error: {e}")
-
-    # Cek band names SoilGrids saat startup
-    debug_bands()
-
     log.info("Bot running")
     tg("🤖 Soil AI siap digunakan", ADMIN_ID)
     loop()
