@@ -49,20 +49,34 @@ def get_location_name(lat, lon):
         )
         data = r.json()
         addr = data.get("address", {})
+
+        # Nama desa/kelurahan — untuk display
         local = (
             addr.get("village") or addr.get("town") or
             addr.get("city") or addr.get("municipality") or
             addr.get("county") or addr.get("state_district") or
             addr.get("state") or "Tidak diketahui"
         )
-        region       = addr.get("state") or addr.get("province") or ""
-        state_dist   = addr.get("county") or addr.get("state_district") or ""
-        country      = addr.get("country", "Tidak diketahui")
-        cc           = addr.get("country_code", "").upper()
-        return local, region, state_dist, country, cc
+
+        # Kecamatan — untuk lookup DB fallback
+        # Nominatim simpan kecamatan di suburb/municipality/city_district
+        kecamatan = (
+            addr.get("suburb") or
+            addr.get("municipality") or
+            addr.get("city_district") or
+            addr.get("town") or
+            local
+        )
+
+        region     = addr.get("state") or addr.get("province") or ""
+        state_dist = addr.get("county") or addr.get("state_district") or ""
+        country    = addr.get("country", "Tidak diketahui")
+        cc         = addr.get("country_code", "").upper()
+        log.info(f"Geocode: local={local} kec={kecamatan} dist={state_dist}")
+        return local, kecamatan, region, state_dist, country, cc
     except Exception as e:
         log.error(f"Geocode error: {e}")
-        return "Tidak diketahui", "", "", "Tidak diketahui", ""
+        return "Tidak diketahui", "Tidak diketahui", "", "", "Tidak diketahui", ""
 
 def flag(cc):
     if not cc or len(cc) != 2:
@@ -514,7 +528,7 @@ def analyze(lat, lon, chat_id):
     log.info(f"Analyze start: {lat}, {lon}")
     tg("Menganalisis tanah... mohon tunggu sebentar.", chat_id)
 
-    local, region, state_dist, country, cc = get_location_name(lat, lon)
+    local, kecamatan, region, state_dist, country, cc = get_location_name(lat, lon)
     flag_em = flag(cc)
 
     raw   = get_soil_profile(lat, lon)
@@ -524,9 +538,11 @@ def analyze(lat, lon, chat_id):
 
     conf_lbl, conf_em, gee_ratio = data_confidence(p, rain, slope)
 
-    # Ambil fallback dari DB
-    fb = lookup_fallback(local, state_dist, region)
-    log.info(f"Fallback lookup: local={local} dist={state_dist} → {fb['zona_key'] if fb else 'None'}")
+    # Ambil fallback dari DB — coba kecamatan dulu, fallback ke local
+    fb = lookup_fallback(kecamatan, state_dist, region)
+    if fb is None:
+        fb = lookup_fallback(local, state_dist, region)
+    log.info(f"Fallback lookup: kec={kecamatan} local={local} dist={state_dist} → {fb['zona_key'] if fb else 'None'}")
 
     # Cross-validate GEE vs fallback
     cv = cross_validate(p, fb, gee_ratio)
