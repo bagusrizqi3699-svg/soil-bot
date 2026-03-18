@@ -1010,40 +1010,110 @@ DB.update(DB_JAKARTA)
 # FUNGSI LOOKUP
 # =============================================================================
 
+
+# =============================================================================
+# LOOKUP BY KABUPATEN — fallback terakhir kalau nama kecamatan tidak ketemu
+# Return zona yang paling dominan/representatif untuk kabupaten tsb
+# =============================================================================
+
+KABUPATEN_DEFAULT = {
+    # Jawa Timur
+    "nganjuk":          "alluvial_sungai",
+    "bojonegoro":       "grumusol_ekspansif",
+    "lamongan":         "grumusol_ekspansif",
+    "tuban":            "mediteran_kapur",
+    "gresik":           "alluvial_pantai",
+    "sidoarjo":         "alluvial_pantai",
+    "surabaya":         "alluvial_sungai",
+    "mojokerto":        "alluvial_sungai",
+    "jombang":          "alluvial_sungai",
+    "madiun":           "alluvial_sungai",
+    "magetan":          "andosol_vulkanik",
+    "ngawi":            "grumusol_ekspansif",
+    "ponorogo":         "latosol_merah",
+    "pacitan":          "litosol_berbatu",
+    "trenggalek":       "litosol_berbatu",
+    "tulungagung":      "alluvial_sungai",
+    "blitar":           "alluvial_sungai",
+    "kediri":           "alluvial_sungai",
+    "malang":           "vulkanik_sedang",
+    "pasuruan":         "alluvial_sungai",
+    "probolinggo":      "alluvial_pantai",
+    "lumajang":         "alluvial_sungai",
+    "jember":           "latosol_merah",
+    "situbondo":        "alluvial_pantai",
+    "bondowoso":        "latosol_merah",
+    "banyuwangi":       "latosol_merah",
+    "sampang":          "madura_lempung",
+    "pamekasan":        "madura_lempung",
+    "sumenep":          "madura_lempung",
+    "bangkalan":        "madura_lempung",
+    # Jakarta
+    "jakarta utara":    "urban_jakarta_utara",
+    "jakarta pusat":    "alluvial_sungai",
+    "jakarta barat":    "alluvial_sungai",
+    "jakarta timur":    "alluvial_sungai",
+    "jakarta selatan":  "urban_jakarta_selatan",
+}
+
+
+def lookup_by_kabupaten(state_district: str) -> dict | None:
+    """Fallback terakhir — return profil default kabupaten."""
+    kab = state_district.lower().strip()
+    for prefix in ["kabupaten ", "kota ", "kab. ", "kab "]:
+        kab = kab.replace(prefix, "")
+    zona_key = KABUPATEN_DEFAULT.get(kab)
+    if zona_key is None:
+        return None
+    data = ZONA[zona_key].copy()
+    data["cbr_est"]  = (data["cbr_min"] + data["cbr_max"]) / 2
+    data["sumber"]   = "Referensi default kabupaten (fallback level 3)"
+    data["zona_key"] = zona_key
+    return data
+
+
 def lookup_fallback(village: str, state_district: str = "", state: str = "") -> dict | None:
     """
-    Cari data fallback berdasarkan nama kecamatan + kabupaten/kota.
-    Strategi lookup:
-      1. exact: "kecamatan|kabupaten"
-      2. fallback: hanya "kecamatan" (ambil match pertama)
-    Return dict data tanah, atau None jika tidak ditemukan.
+    Cari data fallback — 4 level:
+    1. Exact: kecamatan|kabupaten
+    2. Scan: nama kecamatan saja (match pertama)
+    3. Default kabupaten dari state_district
+    4. Coba village sebagai nama kabupaten langsung
     """
     kec = village.lower().strip() if village else ""
     kab = state_district.lower().strip() if state_district else ""
-
-    # Bersihkan prefix "kabupaten ", "kota ", "kab. "
     for prefix in ["kabupaten ", "kota ", "kab. ", "kab "]:
         kab = kab.replace(prefix, "")
 
-    # Lookup exact dengan kabupaten
-    key_exact = f"{kec}|{kab}"
-    zona_key = DB.get(key_exact)
+    # Level 1: exact match kecamatan|kabupaten
+    zona_key = DB.get(f"{kec}|{kab}")
 
-    # Fallback: scan semua key yang mulai dengan kecamatan
+    # Level 2: scan kecamatan tanpa kabupaten
     if zona_key is None:
         for k, v in DB.items():
             if k.split("|")[0] == kec:
                 zona_key = v
                 break
 
-    if zona_key is None:
-        return None
+    if zona_key is not None:
+        data = ZONA[zona_key].copy()
+        data["cbr_est"]  = (data["cbr_min"] + data["cbr_max"]) / 2
+        data["sumber"]   = "Literatur geoteknik (fallback)"
+        data["zona_key"] = zona_key
+        return data
 
-    data = ZONA[zona_key].copy()
-    data["cbr_est"]  = (data["cbr_min"] + data["cbr_max"]) / 2
-    data["sumber"]   = "Literatur geoteknik (fallback)"
-    data["zona_key"] = zona_key
-    return data
+    # Level 3: default kabupaten dari state_district
+    result = lookup_by_kabupaten(state_district)
+    if result is not None:
+        return result
+
+    # Level 4: coba village sebagai nama kabupaten/kota langsung
+    # (untuk kasus Nominatim return nama kota besar di field local, dist kosong)
+    result = lookup_by_kabupaten(village)
+    if result is not None:
+        return result
+
+    return None
 
 
 def get_cbr_fallback(village: str, state_district: str = "", state: str = "") -> float | None:
