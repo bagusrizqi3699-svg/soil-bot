@@ -41,37 +41,43 @@ def tg(msg, chat_id):
 # ================= REVERSE GEOCODE =================
 def get_location_name(lat, lon):
     try:
+        # zoom=10 = kecamatan level di Nominatim Indonesia
         r = requests.get(
             "https://nominatim.openstreetmap.org/reverse",
-            params={"lat": lat, "lon": lon, "format": "json"},
+            params={"lat": lat, "lon": lon, "format": "json", "zoom": 10},
             headers={"User-Agent": "SoilAnalysisBot/1.0"},
             timeout=10
         )
-        data = r.json()
-        addr = data.get("address", {})
+        data_kec = r.json()
+        addr_kec = data_kec.get("address", {})
 
-        # Nama desa/kelurahan — untuk display
-        local = (
-            addr.get("village") or addr.get("town") or
-            addr.get("city") or addr.get("municipality") or
-            addr.get("county") or addr.get("state_district") or
-            addr.get("state") or "Tidak diketahui"
-        )
-
-        # Kecamatan — untuk lookup DB fallback
-        # Nominatim simpan kecamatan di suburb/municipality/city_district
+        # Nama kecamatan dari zoom=10
         kecamatan = (
-            addr.get("suburb") or
-            addr.get("municipality") or
-            addr.get("city_district") or
-            addr.get("town") or
-            local
+            addr_kec.get("village") or addr_kec.get("town") or
+            addr_kec.get("municipality") or addr_kec.get("suburb") or
+            addr_kec.get("city_district") or "Tidak diketahui"
         )
 
-        region     = addr.get("state") or addr.get("province") or ""
-        state_dist = addr.get("county") or addr.get("state_district") or ""
-        country    = addr.get("country", "Tidak diketahui")
-        cc         = addr.get("country_code", "").upper()
+        # zoom=14 = nama desa/kelurahan untuk display
+        r2 = requests.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={"lat": lat, "lon": lon, "format": "json", "zoom": 14},
+            headers={"User-Agent": "SoilAnalysisBot/1.0"},
+            timeout=10
+        )
+        data_desa = r2.json()
+        addr_desa = data_desa.get("address", {})
+
+        local = (
+            addr_desa.get("village") or addr_desa.get("town") or
+            addr_desa.get("city") or addr_desa.get("municipality") or
+            addr_desa.get("county") or kecamatan
+        )
+
+        region     = addr_desa.get("state") or addr_desa.get("province") or ""
+        state_dist = addr_desa.get("county") or addr_desa.get("state_district") or ""
+        country    = addr_desa.get("country", "Tidak diketahui")
+        cc         = addr_desa.get("country_code", "").upper()
         log.info(f"Geocode: local={local} kec={kecamatan} dist={state_dist}")
         return local, kecamatan, region, state_dist, country, cc
     except Exception as e:
